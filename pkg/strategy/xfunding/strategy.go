@@ -519,7 +519,7 @@ func (s *Strategy) CrossRun(
 	})
 
 	if binanceStream, ok := s.futuresSession.UserDataStream.(*binance.Stream); ok {
-		binanceStream.OnAccountUpdateEvent(func(e *binance.AccountUpdateEvent) {
+		binanceStream.OnFuturesAccountUpdateEvent(func(e *binance.FuturesAccountUpdateEvent) {
 			s.handleAccountUpdate(ctx, e)
 		})
 	}
@@ -557,7 +557,7 @@ func (s *Strategy) CrossRun(
 	return nil
 }
 
-func (s *Strategy) handleAccountUpdate(ctx context.Context, e *binance.AccountUpdateEvent) {
+func (s *Strategy) handleAccountUpdate(ctx context.Context, e *binance.FuturesAccountUpdateEvent) {
 	switch e.AccountUpdate.EventReasonType {
 	case binance.AccountUpdateEventReasonDeposit:
 	case binance.AccountUpdateEventReasonWithdraw:

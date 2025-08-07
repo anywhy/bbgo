@@ -2,8 +2,6 @@
 
 package binance
 
-import ()
-
 func (s *Stream) OnDepthEvent(cb func(e *DepthEvent)) {
 	s.depthEventCallbacks = append(s.depthEventCallbacks, cb)
 }
@@ -154,22 +152,22 @@ func (s *Stream) EmitOrderTradeUpdateEvent(e *OrderTradeUpdateEvent) {
 	}
 }
 
-func (s *Stream) OnAccountUpdateEvent(cb func(e *AccountUpdateEvent)) {
-	s.accountUpdateEventCallbacks = append(s.accountUpdateEventCallbacks, cb)
+func (s *Stream) OnFuturesAccountUpdateEvent(cb func(e *FuturesAccountUpdateEvent)) {
+	s.futuresAccountUpdateEventCallbacks = append(s.futuresAccountUpdateEventCallbacks, cb)
 }
 
-func (s *Stream) EmitAccountUpdateEvent(e *AccountUpdateEvent) {
-	for _, cb := range s.accountUpdateEventCallbacks {
+func (s *Stream) EmitFuturesAccountUpdateEvent(e *FuturesAccountUpdateEvent) {
+	for _, cb := range s.futuresAccountUpdateEventCallbacks {
 		cb(e)
 	}
 }
 
-func (s *Stream) OnAccountConfigUpdateEvent(cb func(e *AccountConfigUpdateEvent)) {
-	s.accountConfigUpdateEventCallbacks = append(s.accountConfigUpdateEventCallbacks, cb)
+func (s *Stream) OnFuturesAccountConfigUpdateEvent(cb func(e *FuturesAccountConfigUpdateEvent)) {
+	s.futuresAccountConfigUpdateEventCallbacks = append(s.futuresAccountConfigUpdateEventCallbacks, cb)
 }
 
-func (s *Stream) EmitAccountConfigUpdateEvent(e *AccountConfigUpdateEvent) {
-	for _, cb := range s.accountConfigUpdateEventCallbacks {
+func (s *Stream) EmitFuturesAccountConfigUpdateEvent(e *FuturesAccountConfigUpdateEvent) {
+	for _, cb := range s.futuresAccountConfigUpdateEventCallbacks {
 		cb(e)
 	}
 }
@@ -235,9 +233,9 @@ type StreamEventHub interface {
 
 	OnOrderTradeUpdateEvent(cb func(e *OrderTradeUpdateEvent))
 
-	OnAccountUpdateEvent(cb func(e *AccountUpdateEvent))
+	OnFuturesAccountUpdateEvent(cb func(e *FuturesAccountUpdateEvent))
 
-	OnAccountConfigUpdateEvent(cb func(e *AccountConfigUpdateEvent))
+	OnFuturesAccountConfigUpdateEvent(cb func(e *FuturesAccountConfigUpdateEvent))
 
 	OnMarginCallEvent(cb func(e *MarginCallEvent))
 

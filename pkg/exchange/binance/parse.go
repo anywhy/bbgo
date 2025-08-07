@@ -466,13 +466,13 @@ func parseWebSocketEvent(message []byte) (interface{}, error) {
 
 	// Event: Balance and Position Update
 	case "ACCOUNT_UPDATE":
-		var event AccountUpdateEvent
+		var event FuturesAccountUpdateEvent
 		err = json.Unmarshal([]byte(message), &event)
 		return &event, err
 
 	// Event: Order Update
 	case "ACCOUNT_CONFIG_UPDATE":
-		var event AccountConfigUpdateEvent
+		var event FuturesAccountConfigUpdateEvent
 		err = json.Unmarshal([]byte(message), &event)
 		return &event, err
 
@@ -1143,13 +1143,13 @@ type MarginCallEvent struct {
 }
 
 // AccountUpdateEvent is only used in the futures user data stream
-type AccountUpdateEvent struct {
+type FuturesAccountUpdateEvent struct {
 	EventBase
 	Transaction   int64         `json:"T"`
 	AccountUpdate AccountUpdate `json:"a"`
 }
 
-type AccountConfigUpdateEvent struct {
+type FuturesAccountConfigUpdateEvent struct {
 	EventBase
 	Transaction int64 `json:"T"`
 

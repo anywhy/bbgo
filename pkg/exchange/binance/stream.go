@@ -76,11 +76,11 @@ type Stream struct {
 	continuousKLineClosedEventCallbacks []func(e *ContinuousKLineEvent)
 
 	// futures user data stream event callbacks
-	orderTradeUpdateEventCallbacks    []func(e *OrderTradeUpdateEvent)
-	accountUpdateEventCallbacks       []func(e *AccountUpdateEvent)
-	accountConfigUpdateEventCallbacks []func(e *AccountConfigUpdateEvent)
-	marginCallEventCallbacks          []func(e *MarginCallEvent)
-	listenKeyExpiredCallbacks         []func(e *ListenKeyExpired)
+	orderTradeUpdateEventCallbacks           []func(e *OrderTradeUpdateEvent)
+	futuresAccountUpdateEventCallbacks       []func(e *FuturesAccountUpdateEvent)
+	futuresAccountConfigUpdateEventCallbacks []func(e *FuturesAccountConfigUpdateEvent)
+	marginCallEventCallbacks                 []func(e *MarginCallEvent)
+	listenKeyExpiredCallbacks                []func(e *ListenKeyExpired)
 
 	errorCallbacks []func(e *ErrorEvent)
 
@@ -490,11 +490,11 @@ func (s *Stream) dispatchEvent(e interface{}) {
 	case *OrderTradeUpdateEvent:
 		s.EmitOrderTradeUpdateEvent(e)
 
-	case *AccountUpdateEvent:
-		s.EmitAccountUpdateEvent(e)
+	case *FuturesAccountUpdateEvent:
+		s.EmitFuturesAccountUpdateEvent(e)
 
-	case *AccountConfigUpdateEvent:
-		s.EmitAccountConfigUpdateEvent(e)
+	case *FuturesAccountConfigUpdateEvent:
+		s.EmitFuturesAccountConfigUpdateEvent(e)
 
 	case *ListenKeyExpired:
 		s.EmitListenKeyExpired(e)
