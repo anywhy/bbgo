@@ -26,6 +26,22 @@ const (
 	FuturesOrderTypeTrailingStopMarket FuturesOrderType = "TRAILING_STOP_MARKET"
 )
 
+type TimeInForceType string
+
+const (
+	TimeInForceTypeGTC TimeInForceType = "GTC" // Good Till Cancel
+	TimeInForceTypeIOC TimeInForceType = "IOC" // Immediate or Cancel
+	TimeInForceTypeFOK TimeInForceType = "FOK" // Fill or Kill
+	TimeInForceTypeGTX TimeInForceType = "GTX" // Good Till Crossing (Post Only)
+)
+
+type WorkingType string
+
+const (
+	WorkingTypeMarkPrice     WorkingType = "MARK_PRICE"
+	WorkingTypeContractPrice WorkingType = "CONTRACT_PRICE"
+)
+
 type FuturesOrderResponse struct {
 	ClientOrderId           string           `json:"clientOrderId"`
 	CumQty                  fixedpoint.Value `json:"cumQty"`
@@ -55,7 +71,7 @@ type FuturesOrderResponse struct {
 	GoodTillDate            int64            `json:"goodTillDate"`
 }
 
-//go:generate requestgen -method POST -url "/fapi/v1/order" -type FuturesPlaceOrderRequest -responseType []FuturesPositionRisk
+//go:generate requestgen -method POST -url "/fapi/v1/order" -type FuturesPlaceOrderRequest -responseType FuturesOrderResponse
 type FuturesPlaceOrderRequest struct {
 	client requestgen.AuthenticatedAPIClient
 
@@ -69,6 +85,14 @@ type FuturesPlaceOrderRequest struct {
 	activationPrice *fixedpoint.Value `param:"activationPrice"`
 	callbackRate    *fixedpoint.Value `param:"callbackRate"`
 	priceProtect    *string           `param:"priceProtect"` // "TRUE" or "FALSE"
+
+	orderType        FuturesOrderType `param:"type"`
+	timeInForce      *TimeInForceType `param:"timeInForce"`
+	reduceOnly       *string          `param:"reduceOnly"`
+	newClientOrderID *string          `param:"newClientOrderId"`
+	workingType      *WorkingType     `param:"workingType"`
+	newOrderRespType OrderRespType    `param:"newOrderRespType"`
+	closePosition    *string          `param:"closePosition"`
 }
 
 func (c *FuturesRestClient) NewFuturesPlaceOrderRequest() *FuturesPlaceOrderRequest {
