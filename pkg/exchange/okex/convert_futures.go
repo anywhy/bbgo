@@ -43,14 +43,12 @@ func toGlobalFuturesPositions(futuresPositions []okexapi.Position) types.Futures
 		isolated := futuresPosition.MgnMode == okexapi.MarginModeIsolated
 		symbol := toGlobalSymbol(futuresPosition.InstId)
 		retFuturesPositions[symbol] = types.FuturesPosition{
-			Isolated:    isolated,
-			AverageCost: futuresPosition.AvgPx,
-			Base:        futuresPosition.Pos,
-			Quote:       futuresPosition.Pos.Mul(futuresPosition.MarkPx),
-			PositionRisk: &types.PositionRisk{
-				Leverage: futuresPosition.Lever,
-			},
-			Symbol: symbol,
+			Isolated:     isolated,
+			AverageCost:  futuresPosition.AvgPx,
+			Base:         futuresPosition.Pos,
+			Quote:        futuresPosition.Pos.Mul(futuresPosition.MarkPx),
+			PositionRisk: &toGlobalPositionRisk([]okexapi.Position{futuresPosition})[0],
+			Symbol:       symbol,
 		}
 	}
 
@@ -58,9 +56,10 @@ func toGlobalFuturesPositions(futuresPositions []okexapi.Position) types.Futures
 }
 
 func toGlobalPositionSide(positionSide okexapi.PosSide) types.PositionType {
-	if positionSide == okexapi.PosSideLong {
+	switch positionSide {
+	case okexapi.PosSideLong:
 		return types.PositionLong
-	} else if positionSide == okexapi.PosSideShort {
+	case okexapi.PosSideShort:
 		return types.PositionShort
 	}
 	return types.PositionType(positionSide)
