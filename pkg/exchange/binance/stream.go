@@ -193,6 +193,8 @@ func NewStream(ex *Exchange, client *binance.Client, futuresClient *futures.Clie
 	stream.OnOrderTradeUpdateEvent(stream.handleOrderTradeUpdateEvent)
 	// Event type ALGO_UPDATE from user data stream updates AlgoOrder.
 	stream.OnAlgoOrderUpdateEvent(stream.handleAlgoOrderUpdateEvent)
+	// Event type ACCOUNT_UPDATE from user data stream updates FuturesPosition.
+	stream.OnAccountUpdateEvent(stream.handleAccountUpdateEvent)
 	// ===================================
 
 	if debugMode {
@@ -878,4 +880,29 @@ func (s *Stream) handleAlgoOrderUpdateEvent(e *AlgoOrderUpdateEvent) {
 	}
 
 	s.EmitOrderUpdate(*order)
+}
+
+func (s *Stream) handleAccountUpdateEvent(e *AccountUpdateEvent) {
+	if !s.exchange.IsFutures {
+		return
+	}
+
+	positions := make(types.FuturesPositionMap, len(e.AccountUpdate.Positions))
+	for _, position := range e.AccountUpdate.Positions {
+		posKey := types.NewPositionKey(position.Symbol, toGlobalPositionSide(position.PositionSide))
+		positions[posKey] = types.FuturesPosition{
+			Isolated:     s.exchange.IsIsolatedFutures,
+			AverageCost:  position.EntryPrice,
+			Base:         position.PositionAmount,
+			Quote:        position.PositionAmount.Mul(position.EntryPrice),
+			PositionSide: toGlobalPositionSide(position.PositionSide),
+			Symbol:       posKey.Symbol,
+			UpdateTime:   time.Now().UnixMilli(),
+		}
+	}
+
+	if len(positions) > 0 {
+		s.EmitFuturesPositionUpdate(positions)
+	}
+
 }
