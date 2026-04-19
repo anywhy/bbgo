@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/adshao/go-binance/v2/futures"
@@ -1349,6 +1350,11 @@ func (e *AlgoOrderUpdateEvent) OrderFutures() (*types.Order, error) {
 		return nil, errors.New("algo update event type is not for futures order")
 	}
 
+	var originalOrderId uint64
+	if e.AlgoOrder.OrderId != "" {
+		originalOrderId, _ = strconv.ParseUint(e.AlgoOrder.OrderId, 10, 64)
+	}
+
 	return &types.Order{
 		Exchange: types.ExchangeBinance,
 		SubmitOrder: types.SubmitOrder{
@@ -1362,6 +1368,7 @@ func (e *AlgoOrderUpdateEvent) OrderFutures() (*types.Order, error) {
 			TimeInForce:   types.TimeInForce(e.AlgoOrder.TimeInForce),
 		},
 		OrderID:          uint64(e.AlgoOrder.AlgoId),
+		OriginalOrderId:  originalOrderId,
 		Status:           toGlobalFuturesOrderStatus(futures.OrderStatusType(e.AlgoOrder.Status)),
 		ExecutedQuantity: e.AlgoOrder.ExecutedQuantity,
 		UpdateTime:       types.Time(e.TransactionTime.Time()),

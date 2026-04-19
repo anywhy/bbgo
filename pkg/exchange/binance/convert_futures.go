@@ -2,6 +2,7 @@ package binance
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/adshao/go-binance/v2/futures"
 	"github.com/c9s/bbgo/pkg/exchange/binance/binanceapi"
@@ -163,6 +164,7 @@ func toGlobalFuturesOrder[T FuturesOrderConstraint](orderSource T, isIsolated bo
 		avgPrice         string
 		timeInForce      futures.TimeInForceType
 		orderID          int64
+		actualOrderId    uint64
 		status           futures.OrderStatusType
 		executedQuantity string
 		time             int64
@@ -220,6 +222,7 @@ func toGlobalFuturesOrder[T FuturesOrderConstraint](orderSource T, isIsolated bo
 		avgPrice = "" // GetAlgoOrderResp doesn't have AvgPrice
 		timeInForce = o.TimeInForce
 		orderID = o.AlgoId
+		actualOrderId, _ = strconv.ParseUint(o.ActualOrderId, 10, 64)
 		status = futures.OrderStatusType(o.AlgoStatus)
 		executedQuantity = "0" // GetAlgoOrderResp doesn't have ExecutedQuantity
 		time = o.CreateTime
@@ -260,6 +263,7 @@ func toGlobalFuturesOrder[T FuturesOrderConstraint](orderSource T, isIsolated bo
 		},
 		Exchange:         types.ExchangeBinance,
 		OrderID:          uint64(orderID),
+		OriginalOrderId:  actualOrderId,
 		Status:           toGlobalFuturesOrderStatus(status),
 		ExecutedQuantity: fixedpoint.MustNewFromString(executedQuantity),
 		CreationTime:     types.Time(millisecondTime(time)),

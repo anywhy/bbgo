@@ -756,4 +756,54 @@ func TestAlgoOrderUpdateEvent_OrderFutures(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("parses numeric actual order id", func(t *testing.T) {
+		event := &AlgoOrderUpdateEvent{
+			TransactionTime: transactionTime,
+			AlgoOrder: AlgoOrder{
+				ClientAlgoId:     "test-actual-order-id",
+				AlgoId:           112233,
+				OrderType:        "TAKE_PROFIT",
+				Symbol:           "BNBUSDT",
+				Side:             "SELL",
+				TimeInForce:      "GTC",
+				Quantity:         fixedpoint.MustNewFromString("0.5"),
+				Price:            fixedpoint.MustNewFromString("700"),
+				TriggerPrice:     fixedpoint.MustNewFromString("680"),
+				Status:           "TRIGGERED",
+				OrderId:          "987654321",
+				ExecutedQuantity: fixedpoint.MustNewFromString("0.1"),
+			},
+		}
+
+		order, err := event.OrderFutures()
+		assert.NoError(t, err)
+		assert.NotNil(t, order)
+		assert.Equal(t, uint64(987654321), order.OriginalOrderId)
+	})
+
+	t.Run("invalid actual order id string falls back to zero", func(t *testing.T) {
+		event := &AlgoOrderUpdateEvent{
+			TransactionTime: transactionTime,
+			AlgoOrder: AlgoOrder{
+				ClientAlgoId:     "test-invalid-actual-order-id",
+				AlgoId:           445566,
+				OrderType:        "STOP",
+				Symbol:           "BTCUSDT",
+				Side:             "BUY",
+				TimeInForce:      "GTC",
+				Quantity:         fixedpoint.MustNewFromString("1.0"),
+				Price:            fixedpoint.MustNewFromString("50000"),
+				TriggerPrice:     fixedpoint.MustNewFromString("49000"),
+				Status:           "TRIGGERED",
+				OrderId:          "not-a-number",
+				ExecutedQuantity: fixedpoint.MustNewFromString("0"),
+			},
+		}
+
+		order, err := event.OrderFutures()
+		assert.NoError(t, err)
+		assert.NotNil(t, order)
+		assert.Zero(t, order.OriginalOrderId)
+	})
 }

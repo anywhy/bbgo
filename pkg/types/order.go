@@ -339,6 +339,9 @@ type Order struct {
 	// ExecutedQuantity is how much quantity has been executed
 	ExecutedQuantity fixedpoint.Value `json:"executedQuantity" db:"executed_quantity"`
 
+	// OriginalOrderId is the order id of the executed normal order on exchange for algo order
+	OriginalOrderId uint64 `json:"originalOrderId,omitempty" db:"original_order_id"`
+
 	// IsWorking means if the order is still on the order book (active order)
 	IsWorking bool `json:"isWorking" db:"is_working"`
 
