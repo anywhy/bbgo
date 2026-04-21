@@ -31,6 +31,7 @@ type Strategy struct {
 	// CandidateSymbols is the list of symbols to consider for selection
 	// IMPORTANT: xfundingv2 is now assuming trading on U-major pairs
 	CandidateSymbols []string `json:"candidateSymbols"`
+	TickSymbol       string   `json:"tickSymbol"` // symbol used for ticking the strategy, default to the first candidate symbol
 	// Market selection criteria
 	MarketSelectionConfig *MarketSelectionConfig `json:"marketSelection,omitempty"`
 
@@ -55,7 +56,14 @@ func (s *Strategy) InstanceID() string {
 	return fmt.Sprintf("%s-%s", ID, symbols)
 }
 
+// Defaults() -> Initialize() -> Validate() -> CrossSubscribe() -> CrossRun()
 func (s *Strategy) Defaults() error {
+	if len(s.CandidateSymbols) == 0 {
+		return errors.New("empty candidateSymbols")
+	}
+	if s.TickSymbol == "" {
+		s.TickSymbol = s.CandidateSymbols[0]
+	}
 	return nil
 }
 
@@ -94,6 +102,8 @@ func (s *Strategy) CrossSubscribe(sessions map[string]*bbgo.ExchangeSession) {
 		futuresSession.Subscribe(types.KLineChannel, symbol, types.SubscribeOptions{Interval: types.Interval1m})
 		futuresSession.Subscribe(types.BookChannel, symbol, types.SubscribeOptions{})
 	}
+	spotSession.Subscribe(types.MarketTradeChannel, s.TickSymbol, types.SubscribeOptions{})
+	futuresSession.Subscribe(types.MarketTradeChannel, s.TickSymbol, types.SubscribeOptions{})
 }
 
 func (s *Strategy) CrossRun(
@@ -135,6 +145,13 @@ func (s *Strategy) CrossRun(
 		book.BindStream(s.futuresSession.MarketDataStream)
 		s.depthBooks[symbol] = book
 	}
+
+	s.spotSession.MarketDataStream.OnMarketTrade(types.TradeWith(s.TickSymbol, func(trade types.Trade) {
+		s.arbitrage(trade.Time.Time())
+	}))
+	s.futuresSession.MarketDataStream.OnMarketTrade(types.TradeWith(s.TickSymbol, func(trade types.Trade) {
+		s.arbitrage(trade.Time.Time())
+	}))
 
 	return nil
 }
