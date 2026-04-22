@@ -139,6 +139,22 @@ func (s *Strategy) CrossRun(
 	// 3. filter by top N market cap
 	candidateSymbols = s.filterMarketByCapSize(ctx, candidateSymbols)
 
+	if len(candidateSymbols) == 0 {
+		return errors.New("no candidate symbols after filtering")
+	}
+
+	// subscribe BNB pairs for trading fee calculation
+	quoteCurrencies := make(map[string]struct{})
+	for _, symbol := range candidateSymbols {
+		market := s.futuresMarkets[symbol]
+		quoteCurrencies[market.QuoteCurrency] = struct{}{}
+	}
+	for quoteCurrency := range quoteCurrencies {
+		bnbSymbol := fmt.Sprintf("BNB%s", quoteCurrency)
+		s.spotSession.Subscribe(types.KLineChannel, bnbSymbol, types.SubscribeOptions{Interval: types.Interval1m})
+		s.futuresSession.Subscribe(types.KLineChannel, bnbSymbol, types.SubscribeOptions{Interval: types.Interval1m})
+	}
+
 	// initialize depth books for model selection
 	for _, symbol := range candidateSymbols {
 		book := types.NewStreamBook(symbol, s.futuresSession.ExchangeName)

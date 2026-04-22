@@ -14,6 +14,7 @@ import (
 type MarketSelectionConfig struct {
 
 	// Minimum annualized funding rate to consider (e.g., 0.10 = 10%)
+	// recommended to default to 5%
 	MinAnnualizedRate fixedpoint.Value `json:"minAnnualizedRate"`
 
 	// Minimum 24h quote volume
