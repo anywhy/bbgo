@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/c9s/bbgo/pkg/fixedpoint"
+	"github.com/c9s/bbgo/pkg/strategy/grid2/grid2types"
 	"github.com/c9s/bbgo/pkg/types"
 )
 
@@ -50,7 +51,7 @@ func (t *TwinOrder) SetOrder(order types.Order) {
 
 type TwinOrderMap map[fixedpoint.Value]TwinOrder
 
-func findTwinOrderMapKey(grid *Grid, order types.Order) (fixedpoint.Value, error) {
+func findTwinOrderMapKey(grid *grid2types.Grid, order types.Order) (fixedpoint.Value, error) {
 	if order.Side == types.SideTypeSell {
 		return order.Price, nil
 	}
@@ -95,7 +96,7 @@ func (m TwinOrderMap) SyncOrderMap() *types.SyncOrderMap {
 func (m TwinOrderMap) String() string {
 	var sb strings.Builder
 	var pins []fixedpoint.Value
-	for pin, _ := range m {
+	for pin := range m {
 		pins = append(pins, pin)
 	}
 
@@ -116,8 +117,10 @@ func (m TwinOrderMap) String() string {
 // TwinOrderBook is to verify grid
 // For grid trading, there are twin orders between a grid
 // e.g. 100, 200, 300, 400, 500
-//      BUY 100 and SELL 200 are a twin.
-//      BUY 200 and SELL 300 are a twin.
+//
+//	BUY 100 and SELL 200 are a twin.
+//	BUY 200 and SELL 300 are a twin.
+//
 // Because they can't be placed on orderbook at the same time.
 // We use sell price to be the twin orderbook's key
 // New the twin orderbook with pins, and it will sort the pins in asc order.
@@ -140,7 +143,7 @@ type TwinOrderBook struct {
 	size int
 }
 
-func newTwinOrderBook(pins []Pin) *TwinOrderBook {
+func newTwinOrderBook(pins []grid2types.Pin) *TwinOrderBook {
 	var v []fixedpoint.Value
 	for _, pin := range pins {
 		v = append(v, fixedpoint.Value(pin))

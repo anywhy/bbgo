@@ -13,6 +13,7 @@ import (
 	maxapi "github.com/c9s/bbgo/pkg/exchange/max/maxapi"
 	"github.com/c9s/bbgo/pkg/exchange/retry"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
+	"github.com/c9s/bbgo/pkg/strategy/grid2/grid2types"
 	"github.com/c9s/bbgo/pkg/types"
 	"github.com/c9s/bbgo/pkg/util/timejitter"
 )
@@ -337,7 +338,7 @@ func (s *Strategy) recoverEmptyGridOnTwinOrderBook(
 	return nil
 }
 
-func buildTwinOrderBook(pins []Pin, orders []types.Order) (*TwinOrderBook, error) {
+func buildTwinOrderBook(pins []grid2types.Pin, orders []types.Order) (*TwinOrderBook, error) {
 	book := newTwinOrderBook(pins)
 
 	for _, order := range orders {

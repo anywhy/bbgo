@@ -13,6 +13,7 @@ import (
 
 	"github.com/c9s/bbgo/pkg/core"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
+	"github.com/c9s/bbgo/pkg/strategy/grid2/grid2types"
 	gridmocks "github.com/c9s/bbgo/pkg/strategy/grid2/mocks"
 	"github.com/c9s/bbgo/pkg/types"
 	"github.com/c9s/bbgo/pkg/types/mocks"
@@ -50,26 +51,26 @@ func TestStrategy_checkRequiredInvestmentByQuantity(t *testing.T) {
 	}
 
 	t.Run("quote to base balance conversion check", func(t *testing.T) {
-		_, requiredQuote, err := s.checkRequiredInvestmentByQuantity(number(0.0), number(10_000.0), number(0.1), number(13_500.0), []Pin{
-			Pin(number(10_000.0)), // 0.1 * 10_000 = 1000 USD (buy)
-			Pin(number(11_000.0)), // 0.1 * 11_000 = 1100 USD (buy)
-			Pin(number(12_000.0)), // 0.1 * 12_000 = 1200 USD (buy)
-			Pin(number(13_000.0)), // 0.1 * 13_000 = 1300 USD (buy)
-			Pin(number(14_000.0)), // 0.1 * 14_000 = 1400 USD (buy)
-			Pin(number(15_000.0)), // 0.1 * 15_000 = 1500 USD
+		_, requiredQuote, err := s.checkRequiredInvestmentByQuantity(number(0.0), number(10_000.0), number(0.1), number(13_500.0), []grid2types.Pin{
+			grid2types.Pin(number(10_000.0)), // 0.1 * 10_000 = 1000 USD (buy)
+			grid2types.Pin(number(11_000.0)), // 0.1 * 11_000 = 1100 USD (buy)
+			grid2types.Pin(number(12_000.0)), // 0.1 * 12_000 = 1200 USD (buy)
+			grid2types.Pin(number(13_000.0)), // 0.1 * 13_000 = 1300 USD (buy)
+			grid2types.Pin(number(14_000.0)), // 0.1 * 14_000 = 1400 USD (buy)
+			grid2types.Pin(number(15_000.0)), // 0.1 * 15_000 = 1500 USD
 		})
 		assert.NoError(t, err)
 		assert.Equal(t, number(6000.0), requiredQuote)
 	})
 
 	t.Run("quote to base balance conversion not enough", func(t *testing.T) {
-		_, requiredQuote, err := s.checkRequiredInvestmentByQuantity(number(0.0), number(5_000.0), number(0.1), number(13_500.0), []Pin{
-			Pin(number(10_000.0)), // 0.1 * 10_000 = 1000 USD (buy)
-			Pin(number(11_000.0)), // 0.1 * 11_000 = 1100 USD (buy)
-			Pin(number(12_000.0)), // 0.1 * 12_000 = 1200 USD (buy)
-			Pin(number(13_000.0)), // 0.1 * 13_000 = 1300 USD (buy)
-			Pin(number(14_000.0)), // 0.1 * 14_000 = 1400 USD (buy)
-			Pin(number(15_000.0)), // 0.1 * 15_000 = 1500 USD
+		_, requiredQuote, err := s.checkRequiredInvestmentByQuantity(number(0.0), number(5_000.0), number(0.1), number(13_500.0), []grid2types.Pin{
+			grid2types.Pin(number(10_000.0)), // 0.1 * 10_000 = 1000 USD (buy)
+			grid2types.Pin(number(11_000.0)), // 0.1 * 11_000 = 1100 USD (buy)
+			grid2types.Pin(number(12_000.0)), // 0.1 * 12_000 = 1200 USD (buy)
+			grid2types.Pin(number(13_000.0)), // 0.1 * 13_000 = 1300 USD (buy)
+			grid2types.Pin(number(14_000.0)), // 0.1 * 14_000 = 1400 USD (buy)
+			grid2types.Pin(number(15_000.0)), // 0.1 * 15_000 = 1500 USD
 		})
 		assert.EqualError(t, err, "quote balance (5000.000000 USDT) is not enough, required = quote 6000.000000")
 		assert.Equal(t, number(6000.0), requiredQuote)
@@ -91,7 +92,7 @@ func assertPriceSide(t *testing.T, priceSideAsserts []PriceSideAssert, orders []
 func TestStrategy_generateGridOrders(t *testing.T) {
 	t.Run("quote only", func(t *testing.T) {
 		s := newTestStrategy()
-		s.grid = NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
+		s.grid = grid2types.NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
 		s.grid.CalculateArithmeticPins()
 		s.QuantityOrAmount.Quantity = number(0.01)
 
@@ -125,17 +126,17 @@ func TestStrategy_generateGridOrders(t *testing.T) {
 		s.UpperPrice = number(0.9)
 		s.LowerPrice = number(0.1)
 		s.GridNum = 7
-		s.grid = NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
+		s.grid = grid2types.NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
 		s.grid.CalculateArithmeticPins()
 
-		assert.Equal(t, []Pin{
-			Pin(number(0.1)),
-			Pin(number(0.23)),
-			Pin(number(0.36)),
-			Pin(number(0.50)),
-			Pin(number(0.63)),
-			Pin(number(0.76)),
-			Pin(number(0.9)),
+		assert.Equal(t, []grid2types.Pin{
+			grid2types.Pin(number(0.1)),
+			grid2types.Pin(number(0.23)),
+			grid2types.Pin(number(0.36)),
+			grid2types.Pin(number(0.50)),
+			grid2types.Pin(number(0.63)),
+			grid2types.Pin(number(0.76)),
+			grid2types.Pin(number(0.9)),
 		}, s.grid.Pins, "pins are correct")
 
 		lastPrice := number(22100)
@@ -168,7 +169,7 @@ func TestStrategy_generateGridOrders(t *testing.T) {
 
 	t.Run("base and quote", func(t *testing.T) {
 		s := newTestStrategy()
-		s.grid = NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
+		s.grid = grid2types.NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
 		s.grid.CalculateArithmeticPins()
 
 		quoteInvestment := number(10_000.0)
@@ -218,7 +219,7 @@ func TestStrategy_generateGridOrders(t *testing.T) {
 		s.BaseGridNum = baseGridNum
 		s.LowerPrice = lowerPrice
 		s.UpperPrice = upperPrice
-		s.grid = NewGrid(lowerPrice, upperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
+		s.grid = grid2types.NewGrid(lowerPrice, upperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
 		s.grid.CalculateArithmeticPins()
 		assert.Equal(t, 22, len(s.grid.Pins))
 
@@ -277,7 +278,7 @@ func TestStrategy_generateGridOrders(t *testing.T) {
 		s.BaseGridNum = baseGridNum
 		s.LowerPrice = lowerPrice
 		s.UpperPrice = upperPrice
-		s.grid = NewGrid(lowerPrice, upperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
+		s.grid = grid2types.NewGrid(lowerPrice, upperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
 		s.grid.CalculateArithmeticPins()
 		assert.Equal(t, 22, len(s.grid.Pins))
 
@@ -323,7 +324,7 @@ func TestStrategy_generateGridOrders(t *testing.T) {
 
 	t.Run("base and quote with pre-calculated baseGridNumber", func(t *testing.T) {
 		s := newTestStrategy()
-		s.grid = NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
+		s.grid = grid2types.NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
 		s.grid.CalculateArithmeticPins()
 
 		s.BaseGridNum = 4
@@ -363,7 +364,7 @@ func TestStrategy_generateGridOrders(t *testing.T) {
 
 	t.Run("base and quote with last price eq sell price", func(t *testing.T) {
 		s := newTestStrategy()
-		s.grid = NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
+		s.grid = grid2types.NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
 		s.grid.CalculateArithmeticPins()
 		s.BaseGridNum = 4
 
@@ -402,7 +403,7 @@ func TestStrategy_generateGridOrders(t *testing.T) {
 
 	t.Run("enough base + quote", func(t *testing.T) {
 		s := newTestStrategy()
-		s.grid = NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
+		s.grid = grid2types.NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
 		s.grid.CalculateArithmeticPins()
 		s.QuantityOrAmount.Quantity = number(0.01)
 
@@ -432,7 +433,7 @@ func TestStrategy_generateGridOrders(t *testing.T) {
 	t.Run("enough base + quote + profitSpread", func(t *testing.T) {
 		s := newTestStrategy()
 		s.ProfitSpread = number(1_000)
-		s.grid = NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
+		s.grid = grid2types.NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
 		s.grid.CalculateArithmeticPins()
 		s.QuantityOrAmount.Quantity = number(0.01)
 
@@ -476,13 +477,13 @@ func TestStrategy_checkRequiredInvestmentByAmount(t *testing.T) {
 		_, requiredQuote, err := s.checkRequiredInvestmentByAmount(
 			number(0.0), number(3_000.0),
 			number(1000.0),
-			number(13_500.0), []Pin{
-				Pin(number(10_000.0)),
-				Pin(number(11_000.0)),
-				Pin(number(12_000.0)),
-				Pin(number(13_000.0)),
-				Pin(number(14_000.0)),
-				Pin(number(15_000.0)),
+			number(13_500.0), []grid2types.Pin{
+				grid2types.Pin(number(10_000.0)),
+				grid2types.Pin(number(11_000.0)),
+				grid2types.Pin(number(12_000.0)),
+				grid2types.Pin(number(13_000.0)),
+				grid2types.Pin(number(14_000.0)),
+				grid2types.Pin(number(15_000.0)),
 			})
 		assert.EqualError(t, err, "quote balance (3000.000000 USDT) is not enough, required = quote 4999.999890")
 		assert.InDelta(t, 4999.999890, requiredQuote.Float64(), number(0.001).Float64())
@@ -501,14 +502,14 @@ func TestStrategy_calculateBaseQuoteInvestmentQuantity(t *testing.T) {
 		lastPrice := number(180.0)
 		quoteInvestment := number(334.0) // 333.33
 		baseInvestment := number(0.5)
-		quantity, err := s.calculateBaseQuoteInvestmentQuantity(quoteInvestment, baseInvestment, lastPrice, []Pin{
-			Pin(number(100.00)),
-			Pin(number(116.67)),
-			Pin(number(133.33)),
-			Pin(number(150.00)),
-			Pin(number(166.67)),
-			Pin(number(183.33)),
-			Pin(number(200.00)),
+		quantity, err := s.calculateBaseQuoteInvestmentQuantity(quoteInvestment, baseInvestment, lastPrice, []grid2types.Pin{
+			grid2types.Pin(number(100.00)),
+			grid2types.Pin(number(116.67)),
+			grid2types.Pin(number(133.33)),
+			grid2types.Pin(number(150.00)),
+			grid2types.Pin(number(166.67)),
+			grid2types.Pin(number(183.33)),
+			grid2types.Pin(number(200.00)),
 		})
 		assert.NoError(t, err)
 		assert.InDelta(t, 0.5, quantity.Float64(), 0.0001)
@@ -525,14 +526,14 @@ func TestStrategy_calculateBaseQuoteInvestmentQuantity(t *testing.T) {
 		lastPrice := number(95.0)
 		quoteInvestment := number(334.0) // 333.33
 		baseInvestment := number(0.5)
-		quantity, err := s.calculateBaseQuoteInvestmentQuantity(quoteInvestment, baseInvestment, lastPrice, []Pin{
-			Pin(number(100.00)),
-			Pin(number(116.67)),
-			Pin(number(133.33)),
-			Pin(number(150.00)),
-			Pin(number(166.67)),
-			Pin(number(183.33)),
-			Pin(number(200.00)),
+		quantity, err := s.calculateBaseQuoteInvestmentQuantity(quoteInvestment, baseInvestment, lastPrice, []grid2types.Pin{
+			grid2types.Pin(number(100.00)),
+			grid2types.Pin(number(116.67)),
+			grid2types.Pin(number(133.33)),
+			grid2types.Pin(number(150.00)),
+			grid2types.Pin(number(166.67)),
+			grid2types.Pin(number(183.33)),
+			grid2types.Pin(number(200.00)),
 		})
 		assert.NoError(t, err)
 		assert.InDelta(t, 0.08333, quantity.Float64(), 0.0001)
@@ -549,13 +550,13 @@ func TestStrategy_calculateQuoteInvestmentQuantity(t *testing.T) {
 		s := newTestStrategy()
 		lastPrice := number(13_500.0)
 		quoteInvestment := number(12_000.0)
-		quantity, err := s.calculateQuoteInvestmentQuantity(quoteInvestment, lastPrice, []Pin{
-			Pin(number(10_000.0)), // buy
-			Pin(number(11_000.0)), // buy
-			Pin(number(12_000.0)), // buy
-			Pin(number(13_000.0)), // buy
-			Pin(number(14_000.0)), // buy
-			Pin(number(15_000.0)),
+		quantity, err := s.calculateQuoteInvestmentQuantity(quoteInvestment, lastPrice, []grid2types.Pin{
+			grid2types.Pin(number(10_000.0)), // buy
+			grid2types.Pin(number(11_000.0)), // buy
+			grid2types.Pin(number(12_000.0)), // buy
+			grid2types.Pin(number(13_000.0)), // buy
+			grid2types.Pin(number(14_000.0)), // buy
+			grid2types.Pin(number(15_000.0)),
 		})
 		assert.NoError(t, err)
 		assert.InDelta(t, 0.199999916, quantity.Float64(), 0.0001)
@@ -565,14 +566,14 @@ func TestStrategy_calculateQuoteInvestmentQuantity(t *testing.T) {
 		s := newTestStrategy()
 		lastPrice := number(160.0)
 		quoteInvestment := number(1_000.0)
-		quantity, err := s.calculateQuoteInvestmentQuantity(quoteInvestment, lastPrice, []Pin{
-			Pin(number(100.0)),  // buy
-			Pin(number(116.67)), // buy
-			Pin(number(133.33)), // buy
-			Pin(number(150.00)), // buy
-			Pin(number(166.67)), // buy
-			Pin(number(183.33)),
-			Pin(number(200.00)),
+		quantity, err := s.calculateQuoteInvestmentQuantity(quoteInvestment, lastPrice, []grid2types.Pin{
+			grid2types.Pin(number(100.0)),  // buy
+			grid2types.Pin(number(116.67)), // buy
+			grid2types.Pin(number(133.33)), // buy
+			grid2types.Pin(number(150.00)), // buy
+			grid2types.Pin(number(166.67)), // buy
+			grid2types.Pin(number(183.33)),
+			grid2types.Pin(number(200.00)),
 		})
 		assert.NoError(t, err)
 		assert.InDelta(t, 1.1764, quantity.Float64(), 0.00001)
@@ -582,14 +583,14 @@ func TestStrategy_calculateQuoteInvestmentQuantity(t *testing.T) {
 		s := newTestStrategy()
 		lastPrice := number(22000.0)
 		quoteInvestment := number(100.0)
-		pins := []Pin{
-			Pin(number(0.1)),
-			Pin(number(0.23)),
-			Pin(number(0.36)),
-			Pin(number(0.50)),
-			Pin(number(0.63)),
-			Pin(number(0.76)),
-			Pin(number(0.90)),
+		pins := []grid2types.Pin{
+			grid2types.Pin(number(0.1)),
+			grid2types.Pin(number(0.23)),
+			grid2types.Pin(number(0.36)),
+			grid2types.Pin(number(0.50)),
+			grid2types.Pin(number(0.63)),
+			grid2types.Pin(number(0.76)),
+			grid2types.Pin(number(0.90)),
 		}
 		quantity, err := s.calculateQuoteInvestmentQuantity(quoteInvestment, lastPrice, pins)
 		assert.NoError(t, err)
@@ -616,13 +617,13 @@ func TestStrategy_calculateQuoteInvestmentQuantity(t *testing.T) {
 		s.ProfitSpread = number(2000.0)
 		lastPrice := number(13_500.0)
 		quoteInvestment := number(7500.0)
-		quantity, err := s.calculateQuoteInvestmentQuantity(quoteInvestment, lastPrice, []Pin{
-			Pin(number(10_000.0)), // sell order @ 12_000
-			Pin(number(11_000.0)), // sell order @ 13_000
-			Pin(number(12_000.0)), // sell order @ 14_000
-			Pin(number(13_000.0)), // sell order @ 15_000
-			Pin(number(14_000.0)), // sell order @ 16_000
-			Pin(number(15_000.0)), // sell order @ 17_000
+		quantity, err := s.calculateQuoteInvestmentQuantity(quoteInvestment, lastPrice, []grid2types.Pin{
+			grid2types.Pin(number(10_000.0)), // sell order @ 12_000
+			grid2types.Pin(number(11_000.0)), // sell order @ 13_000
+			grid2types.Pin(number(12_000.0)), // sell order @ 14_000
+			grid2types.Pin(number(13_000.0)), // sell order @ 15_000
+			grid2types.Pin(number(14_000.0)), // sell order @ 16_000
+			grid2types.Pin(number(15_000.0)), // sell order @ 17_000
 		})
 		assert.NoError(t, err)
 		assert.InDelta(t, 0.099992, quantity.Float64(), 0.0001)

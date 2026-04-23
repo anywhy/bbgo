@@ -8,10 +8,11 @@ import (
 
 	"github.com/c9s/bbgo/pkg/bbgo"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
+	"github.com/c9s/bbgo/pkg/strategy/grid2/grid2types"
 	"github.com/c9s/bbgo/pkg/types"
 )
 
-func debugGrid(logger logrus.FieldLogger, grid *Grid, book *bbgo.ActiveOrderBook) {
+func debugGrid(logger logrus.FieldLogger, grid *grid2types.Grid, book *bbgo.ActiveOrderBook) {
 	var sb strings.Builder
 
 	sb.WriteString("================== GRID ORDERS ==================\n")

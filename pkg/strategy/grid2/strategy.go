@@ -18,6 +18,7 @@ import (
 	"github.com/c9s/bbgo/pkg/core"
 	"github.com/c9s/bbgo/pkg/exchange/retry"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
+	"github.com/c9s/bbgo/pkg/strategy/grid2/grid2types"
 	"github.com/c9s/bbgo/pkg/types"
 	"github.com/c9s/bbgo/pkg/util"
 	"github.com/c9s/bbgo/pkg/util/tradingutil"
@@ -38,7 +39,7 @@ func init() {
 	bbgo.RegisterStrategy(ID, &Strategy{})
 }
 
-type PrettyPins []Pin
+type PrettyPins []grid2types.Pin
 
 func (pp PrettyPins) String() string {
 	var ss []string
@@ -170,7 +171,7 @@ type Strategy struct {
 	// ExchangeSession is an injection field
 	ExchangeSession *bbgo.ExchangeSession
 
-	grid              *Grid
+	grid              *grid2types.Grid
 	session           *bbgo.ExchangeSession
 	orderQueryService types.ExchangeOrderQueryService
 
@@ -584,7 +585,7 @@ func (s *Strategy) handleOrderFilled(o types.Order) {
 }
 
 func (s *Strategy) checkRequiredInvestmentByQuantity(
-	baseBalance, quoteBalance, quantity, lastPrice fixedpoint.Value, pins []Pin,
+	baseBalance, quoteBalance, quantity, lastPrice fixedpoint.Value, pins []grid2types.Pin,
 ) (requiredBase, requiredQuote fixedpoint.Value, err error) {
 	// check more investment budget details
 	requiredBase = fixedpoint.Zero
@@ -644,7 +645,7 @@ func (s *Strategy) checkRequiredInvestmentByQuantity(
 }
 
 func (s *Strategy) checkRequiredInvestmentByAmount(
-	baseBalance, quoteBalance, amount, lastPrice fixedpoint.Value, pins []Pin,
+	baseBalance, quoteBalance, amount, lastPrice fixedpoint.Value, pins []grid2types.Pin,
 ) (requiredBase, requiredQuote fixedpoint.Value, err error) {
 
 	// check more investment budget details
@@ -707,7 +708,7 @@ func (s *Strategy) checkRequiredInvestmentByAmount(
 }
 
 func (s *Strategy) calculateQuoteInvestmentQuantity(
-	quoteInvestment, lastPrice fixedpoint.Value, pins []Pin,
+	quoteInvestment, lastPrice fixedpoint.Value, pins []grid2types.Pin,
 ) (fixedpoint.Value, error) {
 	// quoteInvestment = (p1 * q) + (p2 * q) + (p3 * q) + ....
 	// =>
@@ -765,7 +766,7 @@ func (s *Strategy) calculateQuoteInvestmentQuantity(
 }
 
 func (s *Strategy) calculateBaseQuoteInvestmentQuantity(
-	quoteInvestment, baseInvestment, lastPrice fixedpoint.Value, pins []Pin,
+	quoteInvestment, baseInvestment, lastPrice fixedpoint.Value, pins []grid2types.Pin,
 ) (fixedpoint.Value, error) {
 	s.logger.Infof("calculating quantity by base/quote investment: %f / %f", baseInvestment.Float64(), quoteInvestment.Float64())
 	// q_p1 = q_p2 = q_p3 = q_p4
@@ -1015,8 +1016,8 @@ func (s *Strategy) CloseGrid(ctx context.Context) error {
 	return err
 }
 
-func (s *Strategy) newGrid() *Grid {
-	grid := NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
+func (s *Strategy) newGrid() *grid2types.Grid {
+	grid := grid2types.NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
 	grid.CalculateArithmeticPins()
 	return grid
 }
@@ -1186,7 +1187,7 @@ func (s *Strategy) updateGridNumOfOrdersMetricsWithLock() {
 	}
 }
 
-func (s *Strategy) updateGridNumOfOrdersMetrics(grid *Grid) {
+func (s *Strategy) updateGridNumOfOrdersMetrics(grid *grid2types.Grid) {
 	baseLabels := s.getPrometheusLabels()
 	makerOrders := s.orderExecutor.ActiveMakerOrders()
 	numOfOrders := makerOrders.NumOfOrders()
@@ -1211,7 +1212,7 @@ func (s *Strategy) updateGridNumOfOrdersMetrics(grid *Grid) {
 			}
 			priceSet[order.Price] = struct{}{}
 
-			if grid.HasPin(Pin(order.Price)) {
+			if grid.HasPin(grid2types.Pin(order.Price)) {
 				numOfOrdersWithCorrectPrice++
 			}
 		}
@@ -1378,7 +1379,7 @@ func (s *Strategy) getLastTradePrice(ctx context.Context, session *bbgo.Exchange
 	return ticker.Buy, nil
 }
 
-func calculateMinimalQuoteInvestment(market types.Market, grid *Grid) fixedpoint.Value {
+func calculateMinimalQuoteInvestment(market types.Market, grid *grid2types.Grid) fixedpoint.Value {
 	// upperPrice for buy order
 	lowerPrice := grid.LowerPrice
 	minQuantity := fixedpoint.Max(market.MinNotional.Div(lowerPrice), market.MinQuantity)
@@ -1396,7 +1397,7 @@ func calculateMinimalQuoteInvestment(market types.Market, grid *Grid) fixedpoint
 	return totalQuote
 }
 
-func (s *Strategy) checkMinimalQuoteInvestment(grid *Grid) error {
+func (s *Strategy) checkMinimalQuoteInvestment(grid *grid2types.Grid) error {
 	minimalQuoteInvestment := calculateMinimalQuoteInvestment(s.Market, grid)
 	if s.QuoteInvestment.Compare(minimalQuoteInvestment) <= 0 {
 		return fmt.Errorf("need at least %f %s for quote investment, %f %s given",
@@ -1408,13 +1409,13 @@ func (s *Strategy) checkMinimalQuoteInvestment(grid *Grid) error {
 	return nil
 }
 
-func (s *Strategy) setGrid(grid *Grid) {
+func (s *Strategy) setGrid(grid *grid2types.Grid) {
 	s.mu.Lock()
 	s.grid = grid
 	s.mu.Unlock()
 }
 
-func (s *Strategy) getGrid() *Grid {
+func (s *Strategy) getGrid() *grid2types.Grid {
 	s.mu.Lock()
 	grid := s.grid
 	s.mu.Unlock()
@@ -1422,7 +1423,7 @@ func (s *Strategy) getGrid() *Grid {
 }
 
 // scanMissingPinPrices finds the missing grid order prices
-func scanMissingPinPrices(orderBook *bbgo.ActiveOrderBook, pins []Pin) PriceMap {
+func scanMissingPinPrices(orderBook *bbgo.ActiveOrderBook, pins []grid2types.Pin) PriceMap {
 	// Add all open orders to the local order book
 	gridPrices := make(PriceMap)
 	missingPrices := make(PriceMap)

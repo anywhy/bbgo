@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/c9s/bbgo/pkg/strategy/grid2/grid2types"
 )
 
 func TestGrid_HasPrice_Dnum(t *testing.T) {
@@ -13,7 +15,7 @@ func TestGrid_HasPrice_Dnum(t *testing.T) {
 		upper := number(500.0)
 		lower := number(100.0)
 		size := number(5.0)
-		grid := NewGrid(lower, upper, size, number(0.01))
+		grid := grid2types.NewGrid(lower, upper, size, number(0.01))
 		grid.CalculateArithmeticPins()
 
 		assert.True(t, grid.HasPrice(number(500.0)), "upper price")
@@ -26,17 +28,17 @@ func TestGrid_HasPrice_Dnum(t *testing.T) {
 		upper := number(0.9)
 		lower := number(0.1)
 		size := number(7.0)
-		grid := NewGrid(lower, upper, size, number(0.00000001))
+		grid := grid2types.NewGrid(lower, upper, size, number(0.00000001))
 		grid.CalculateArithmeticPins()
 
-		assert.Equal(t, []Pin{
-			Pin(number("0.1")),
-			Pin(number("0.23333333")),
-			Pin(number("0.36666666")),
-			Pin(number("0.50000000")),
-			Pin(number("0.63333333")),
-			Pin(number("0.76666666")),
-			Pin(number("0.9")),
+		assert.Equal(t, []grid2types.Pin{
+			grid2types.Pin(number("0.1")),
+			grid2types.Pin(number("0.23333333")),
+			grid2types.Pin(number("0.36666666")),
+			grid2types.Pin(number("0.50000000")),
+			grid2types.Pin(number("0.63333333")),
+			grid2types.Pin(number("0.76666666")),
+			grid2types.Pin(number("0.9")),
 		}, grid.Pins)
 
 		assert.False(t, grid.HasPrice(number(200.0)), "out of range")
@@ -49,17 +51,17 @@ func TestGrid_HasPrice_Dnum(t *testing.T) {
 		upper := number(0.9)
 		lower := number(0.1)
 		size := number(7.0)
-		grid := NewGrid(lower, upper, size, number(0.0001))
+		grid := grid2types.NewGrid(lower, upper, size, number(0.0001))
 		grid.CalculateArithmeticPins()
 
-		assert.Equal(t, []Pin{
-			Pin(number(0.1)),
-			Pin(number(0.2333)),
-			Pin(number(0.3666)),
-			Pin(number(0.5000)),
-			Pin(number(0.6333)),
-			Pin(number(0.7666)),
-			Pin(number(0.9)),
+		assert.Equal(t, []grid2types.Pin{
+			grid2types.Pin(number(0.1)),
+			grid2types.Pin(number(0.2333)),
+			grid2types.Pin(number(0.3666)),
+			grid2types.Pin(number(0.5000)),
+			grid2types.Pin(number(0.6333)),
+			grid2types.Pin(number(0.7666)),
+			grid2types.Pin(number(0.9)),
 		}, grid.Pins)
 
 		assert.False(t, grid.HasPrice(number(200.0)), "out of range")
@@ -73,17 +75,17 @@ func TestGrid_HasPrice_Dnum(t *testing.T) {
 		upper := number(90.0)
 		lower := number(10.0)
 		size := number(7.0)
-		grid := NewGrid(lower, upper, size, number(0.001))
+		grid := grid2types.NewGrid(lower, upper, size, number(0.001))
 		grid.CalculateArithmeticPins()
 
-		assert.Equal(t, []Pin{
-			Pin(number("10.0")),
-			Pin(number("23.333")),
-			Pin(number("36.666")),
-			Pin(number("50.00")),
-			Pin(number("63.333")),
-			Pin(number("76.666")),
-			Pin(number("90.0")),
+		assert.Equal(t, []grid2types.Pin{
+			grid2types.Pin(number("10.0")),
+			grid2types.Pin(number("23.333")),
+			grid2types.Pin(number("36.666")),
+			grid2types.Pin(number("50.00")),
+			grid2types.Pin(number("63.333")),
+			grid2types.Pin(number("76.666")),
+			grid2types.Pin(number("90.0")),
 		}, grid.Pins)
 
 		assert.False(t, grid.HasPrice(number(200.0)), "out of range")

@@ -9,6 +9,7 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/c9s/bbgo/pkg/fixedpoint"
+	"github.com/c9s/bbgo/pkg/strategy/grid2/grid2types"
 	"github.com/c9s/bbgo/pkg/types"
 	"github.com/c9s/bbgo/pkg/types/mocks"
 )
@@ -92,7 +93,7 @@ func TestProfitFixer(t *testing.T) {
 	mockHistoryService.EXPECT().QueryClosedOrders(gomock.Any(), "ETHUSDT", mustNewTime("2022-01-01T00:08:00Z"), mustNewTime("2022-01-07T00:00:00Z"), uint64(10)).
 		Return([]types.Order{}, nil)
 
-	grid := NewGrid(number(1000.0), number(2000.0), number(11), number(0.01))
+	grid := grid2types.NewGrid(number(1000.0), number(2000.0), number(11), number(0.01))
 	grid.CalculateArithmeticPins()
 
 	since, err := time.Parse(time.RFC3339, "2022-01-01T00:00:00Z")

@@ -6,23 +6,25 @@ import (
 	"testing"
 	"time"
 
-	"github.com/c9s/bbgo/pkg/bbgo"
-	"github.com/c9s/bbgo/pkg/fixedpoint"
-	"github.com/c9s/bbgo/pkg/types"
-	"github.com/c9s/bbgo/pkg/types/mocks"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
+
+	"github.com/c9s/bbgo/pkg/bbgo"
+	"github.com/c9s/bbgo/pkg/fixedpoint"
+	"github.com/c9s/bbgo/pkg/strategy/grid2/grid2types"
+	"github.com/c9s/bbgo/pkg/types"
+	"github.com/c9s/bbgo/pkg/types/mocks"
 )
 
 func TestBuildTwinOrderBook(t *testing.T) {
 	assert := assert.New(t)
 
-	pins := []Pin{
-		Pin(fixedpoint.NewFromInt(200)),
-		Pin(fixedpoint.NewFromInt(300)),
-		Pin(fixedpoint.NewFromInt(500)),
-		Pin(fixedpoint.NewFromInt(400)),
-		Pin(fixedpoint.NewFromInt(100)),
+	pins := []grid2types.Pin{
+		grid2types.Pin(fixedpoint.NewFromInt(200)),
+		grid2types.Pin(fixedpoint.NewFromInt(300)),
+		grid2types.Pin(fixedpoint.NewFromInt(500)),
+		grid2types.Pin(fixedpoint.NewFromInt(400)),
+		grid2types.Pin(fixedpoint.NewFromInt(100)),
 	}
 	t.Run("build twin orderbook with no order", func(t *testing.T) {
 		b, err := buildTwinOrderBook(pins, nil)
@@ -158,12 +160,12 @@ func TestQueryTradesToUpdateTwinOrderBook(t *testing.T) {
 	defer cancel()
 
 	symbol := "ETHUSDT"
-	pins := []Pin{
-		Pin(fixedpoint.NewFromInt(100)),
-		Pin(fixedpoint.NewFromInt(200)),
-		Pin(fixedpoint.NewFromInt(300)),
-		Pin(fixedpoint.NewFromInt(400)),
-		Pin(fixedpoint.NewFromInt(500)),
+	pins := []grid2types.Pin{
+		grid2types.Pin(fixedpoint.NewFromInt(100)),
+		grid2types.Pin(fixedpoint.NewFromInt(200)),
+		grid2types.Pin(fixedpoint.NewFromInt(300)),
+		grid2types.Pin(fixedpoint.NewFromInt(400)),
+		grid2types.Pin(fixedpoint.NewFromInt(500)),
 	}
 
 	t.Run("query trades and update twin orderbook successfully in one page", func(t *testing.T) {
