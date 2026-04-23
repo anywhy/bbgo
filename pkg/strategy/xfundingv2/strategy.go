@@ -41,6 +41,7 @@ type Strategy struct {
 	futuresOrderBooks, spotOrderBooks map[string]*types.StreamOrderBook
 	spotMarkets, futuresMarkets       types.MarketMap
 	spotSession, futuresSession       *bbgo.ExchangeSession
+	candidateSymbols                  []string
 
 	coinmarketcapClient *coinmarketcap.DataSource
 	mu                  sync.Mutex
@@ -98,17 +99,21 @@ func (s *Strategy) Validate() error {
 }
 
 func (s *Strategy) CrossSubscribe(sessions map[string]*bbgo.ExchangeSession) {
-	spotSession := sessions[s.SpotSession]
-	futuresSession := sessions[s.FuturesSession]
-
-	for _, symbol := range s.CandidateSymbols {
-		spotSession.Subscribe(types.KLineChannel, symbol, types.SubscribeOptions{Interval: types.Interval1m})
-		spotSession.Subscribe(types.BookChannel, symbol, types.SubscribeOptions{})
-		futuresSession.Subscribe(types.KLineChannel, symbol, types.SubscribeOptions{Interval: types.Interval1m})
-		futuresSession.Subscribe(types.BookChannel, symbol, types.SubscribeOptions{})
+	spotSession, ok := sessions[s.SpotSession]
+	if !ok {
+		s.logger.Warnf("spot session %s not found, skip subscription", s.SpotSession)
+		return
 	}
-	spotSession.Subscribe(types.MarketTradeChannel, s.TickSymbol, types.SubscribeOptions{})
-	futuresSession.Subscribe(types.MarketTradeChannel, s.TickSymbol, types.SubscribeOptions{})
+	futuresSession, ok := sessions[s.FuturesSession]
+	if !ok {
+		s.logger.Warnf("futures session %s not found, skip subscription", s.FuturesSession)
+		return
+	}
+
+	for _, sess := range []*bbgo.ExchangeSession{spotSession, futuresSession} {
+		sess.Subscribe(types.KLineChannel, s.TickSymbol, types.SubscribeOptions{Interval: types.Interval1m})
+		sess.Subscribe(types.MarketTradeChannel, s.TickSymbol, types.SubscribeOptions{})
+	}
 }
 
 func (s *Strategy) CrossRun(
@@ -155,6 +160,8 @@ func (s *Strategy) CrossRun(
 		return errors.New("no candidate symbols after filtering")
 	}
 
+	s.candidateSymbols = candidateSymbols
+
 	// subscribe BNB pairs for trading fee calculation
 	quoteCurrencies := make(map[string]struct{})
 	for _, symbol := range candidateSymbols {
@@ -190,12 +197,14 @@ func (s *Strategy) CrossRun(
 		return fmt.Errorf("failed to connect spot stream books: %w", err)
 	}
 
-	s.spotSession.MarketDataStream.OnMarketTrade(types.TradeWith(s.TickSymbol, func(trade types.Trade) {
-		s.tick(trade.Time.Time())
-	}))
-	s.futuresSession.MarketDataStream.OnMarketTrade(types.TradeWith(s.TickSymbol, func(trade types.Trade) {
-		s.tick(trade.Time.Time())
-	}))
+	for _, sess := range []*bbgo.ExchangeSession{s.spotSession, s.futuresSession} {
+		sess.MarketDataStream.OnMarketTrade(types.TradeWith(s.TickSymbol, func(trade types.Trade) {
+			s.tick(trade.Time.Time())
+		}))
+		sess.MarketDataStream.OnKLineClosed(types.KLineWith(s.TickSymbol, types.Interval1m, func(kline types.KLine) {
+			s.tick(kline.EndTime.Time())
+		}))
+	}
 
 	return nil
 }
@@ -204,22 +213,27 @@ func (s *Strategy) tick(tickTime time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.checkRoundStartTime.IsZero() {
+	if s.checkRoundStartTime.IsZero() || s.currentTime.IsZero() {
 		s.checkRoundStartTime = tickTime
+		s.currentTime = tickTime
 		return
 	}
+	// from now on, s.checkRoundStartTime and s.currentTime are not zero
 
-	if !s.currentTime.IsZero() && tickTime.Before(s.currentTime) {
+	// skip tick that's before current time
+	if tickTime.Before(s.currentTime) {
 		return
 	}
 	s.currentTime = tickTime
 
+	// check if it's time to check for new round
 	if s.currentTime.Sub(s.checkRoundStartTime) < s.CheckInterval {
 		return
 	}
 
+	// start checking
 	// 1. check if any open round needs to be closed
-	// 2. check if new round can be opened
+	// 2. check if new round can be opened or existing round needs to be adjusted
 
 	// check interval done, reset and start new check interval
 	s.checkRoundStartTime = s.currentTime

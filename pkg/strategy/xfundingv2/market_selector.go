@@ -64,8 +64,8 @@ func NewMarketSelector(config MarketSelectionConfig, exchange *binance.Exchange,
 	}
 }
 
-// RankMarkets returns a ranked list of market candidates
-func (s *MarketSelector) RankMarkets(ctx context.Context, symbols []string) ([]MarketCandidate, error) {
+// SelectMarkets returns a list of market candidates that meet the selection criteria
+func (s *MarketSelector) SelectMarkets(ctx context.Context, symbols []string) ([]MarketCandidate, error) {
 	// Step 1: Query premium indexes for each symbol
 	indices, err := queryFundingRates(ctx, s.binanceFutures, s.logger, symbols)
 	if err != nil {
@@ -148,8 +148,6 @@ func (s *MarketSelector) RankMarkets(ctx context.Context, symbols []string) ([]M
 		})
 	}
 
-	// TODO: compute composite score and sort candidates
-
 	return candidates, nil
 }
 
@@ -180,41 +178,4 @@ func queryFundingInfo(ctx context.Context, futuresExchange *binance.Exchange) (m
 		m[info.Symbol] = &info
 	}
 	return m, nil
-}
-
-// calculateScores calculates composite scores for ranking
-// Score = AnnualizedRate * 0.6 + NormalizedVolume * 0.4
-func (s *MarketSelector) calculateScores(candidates []MarketCandidate) {
-	if len(candidates) == 0 {
-		return
-	}
-
-	// Find max values for normalization
-	var maxRate, maxVolume fixedpoint.Value
-	for _, c := range candidates {
-		if c.AnnualizedRate.Compare(maxRate) > 0 {
-			maxRate = c.AnnualizedRate
-		}
-		if c.TakerBuyQuoteVolume24h.Compare(maxVolume) > 0 {
-			maxVolume = c.TakerBuyQuoteVolume24h
-		}
-	}
-
-	// Calculate normalized scores
-	for i := range candidates {
-		var normalizedRate, normalizedVolume fixedpoint.Value
-
-		if !maxRate.IsZero() {
-			normalizedRate = candidates[i].AnnualizedRate.Div(maxRate)
-		}
-		if !maxVolume.IsZero() {
-			normalizedVolume = candidates[i].TakerBuyQuoteVolume24h.Div(maxVolume)
-		}
-
-		// Weighted score: rate (60%) + volume (40%)
-		rateScore := normalizedRate.Mul(fixedpoint.NewFromFloat(0.6))
-		volumeScore := normalizedVolume.Mul(fixedpoint.NewFromFloat(0.4))
-
-		candidates[i].Score = rateScore.Add(volumeScore)
-	}
 }
