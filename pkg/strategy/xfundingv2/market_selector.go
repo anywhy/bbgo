@@ -52,16 +52,14 @@ type MarketCandidate struct {
 type MarketSelector struct {
 	MarketSelectionConfig
 	binanceFutures *binance.Exchange
-	orderBooks     map[string]*types.StreamOrderBook
 	logger         logrus.FieldLogger
 }
 
 // NewMarketSelector creates a new MarketSelector
-func NewMarketSelector(config MarketSelectionConfig, exchange *binance.Exchange, orderBooks map[string]*types.StreamOrderBook, logger logrus.FieldLogger) *MarketSelector {
+func NewMarketSelector(config MarketSelectionConfig, exchange *binance.Exchange, logger logrus.FieldLogger) *MarketSelector {
 	return &MarketSelector{
 		MarketSelectionConfig: config,
 		binanceFutures:        exchange,
-		orderBooks:            orderBooks,
 		logger:                logger,
 	}
 }
@@ -117,8 +115,9 @@ func (s *MarketSelector) RankMarkets(ctx context.Context, symbols []string) ([]M
 		}
 
 		// exclude symbols with low liquidity in order book
-		book, ok := s.orderBooks[idx.Symbol]
-		if !ok {
+		book, _, err := s.binanceFutures.QueryDepth(ctx, idx.Symbol)
+		if err != nil {
+			s.logger.WithError(err).Warnf("failed to query order book for %s, skipping liquidity filter", idx.Symbol)
 			continue
 		}
 		bestBid, ok := book.BestBid()
