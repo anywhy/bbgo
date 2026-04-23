@@ -35,13 +35,16 @@ type Strategy struct {
 	// Market selection criteria
 	MarketSelectionConfig *MarketSelectionConfig `json:"marketSelection,omitempty"`
 
-	depthBooks                              map[string]*types.StreamOrderBook
-	spotMarkets, futuresMarkets             types.MarketMap
-	spotSession, futuresSession             *bbgo.ExchangeSession
-	spotOrderExecutor, futuresOrderExecutor *bbgo.GeneralOrderExecutor
+	CheckInterval       time.Duration `json:"checkInterval"`
+	ClosePositionOnExit bool          `json:"closePositionOnExit"`
+
+	futuresOrderBooks, spotOrderBooks map[string]*types.StreamOrderBook
+	spotMarkets, futuresMarkets       types.MarketMap
+	spotSession, futuresSession       *bbgo.ExchangeSession
 
 	coinmarketcapClient *coinmarketcap.DataSource
 	mu                  sync.Mutex
+	checkRoundStartTime time.Time
 	currentTime         time.Time
 
 	logger logrus.FieldLogger
@@ -78,6 +81,8 @@ func (s *Strategy) Initialize() error {
 	} else {
 		s.coinmarketcapClient = coinmarketcap.New(apiKey)
 	}
+	s.futuresOrderBooks = make(map[string]*types.StreamOrderBook)
+	s.spotOrderBooks = make(map[string]*types.StreamOrderBook)
 	return nil
 }
 
@@ -118,6 +123,13 @@ func (s *Strategy) CrossRun(
 	if s.spotSession == nil {
 		return fmt.Errorf("spot session %s not found", s.SpotSession)
 	}
+	futuresEx, ok := s.futuresSession.Exchange.(types.FuturesExchange)
+	if !ok {
+		return fmt.Errorf("sessioin %s does not support futures", s.futuresSession.Name)
+	}
+	if !futuresEx.GetFuturesSettings().IsFutures {
+		return fmt.Errorf("session %s is not configured for futures trading", s.futuresSession.Name)
+	}
 
 	spotMarkets, err := s.spotSession.Exchange.QueryMarkets(ctx)
 	if err != nil {
@@ -156,32 +168,61 @@ func (s *Strategy) CrossRun(
 	}
 
 	// initialize depth books for model selection
+	futureStream := s.futuresSession.Exchange.NewStream()
+	futureStream.SetPublicOnly()
+	spotStream := s.spotSession.Exchange.NewStream()
+	spotStream.SetPublicOnly()
 	for _, symbol := range candidateSymbols {
-		book := types.NewStreamBook(symbol, s.futuresSession.ExchangeName)
-		book.BindStream(s.futuresSession.MarketDataStream)
-		s.depthBooks[symbol] = book
+		futuresBook := types.NewStreamBook(symbol, s.futuresSession.ExchangeName)
+		futuresBook.BindStream(futureStream)
+		futureStream.Subscribe(types.BookChannel, symbol, types.SubscribeOptions{})
+		s.futuresOrderBooks[symbol] = futuresBook
+
+		spotBook := types.NewStreamBook(symbol, s.spotSession.ExchangeName)
+		spotBook.BindStream(spotStream)
+		spotStream.Subscribe(types.BookChannel, symbol, types.SubscribeOptions{})
+		s.spotOrderBooks[symbol] = spotBook
+	}
+	if err := futureStream.Connect(ctx); err != nil {
+		return fmt.Errorf("failed to connect future stream books: %w", err)
+	}
+	if err := spotStream.Connect(ctx); err != nil {
+		return fmt.Errorf("failed to connect spot stream books: %w", err)
 	}
 
 	s.spotSession.MarketDataStream.OnMarketTrade(types.TradeWith(s.TickSymbol, func(trade types.Trade) {
-		s.arbitrage(trade.Time.Time())
+		s.tick(trade.Time.Time())
 	}))
 	s.futuresSession.MarketDataStream.OnMarketTrade(types.TradeWith(s.TickSymbol, func(trade types.Trade) {
-		s.arbitrage(trade.Time.Time())
+		s.tick(trade.Time.Time())
 	}))
 
 	return nil
 }
 
-func (s *Strategy) arbitrage(tickTime time.Time) {
+func (s *Strategy) tick(tickTime time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.checkRoundStartTime.IsZero() {
+		s.checkRoundStartTime = tickTime
+		return
+	}
 
 	if !s.currentTime.IsZero() && tickTime.Before(s.currentTime) {
 		return
 	}
 	s.currentTime = tickTime
 
-	// start arbitrage round
+	if s.currentTime.Sub(s.checkRoundStartTime) < s.CheckInterval {
+		return
+	}
+
+	// 1. check if any open round needs to be closed
+	// 2. check if new round can be opened
+
+	// check interval done, reset and start new check interval
+	s.checkRoundStartTime = s.currentTime
 }
 
 // static market filters

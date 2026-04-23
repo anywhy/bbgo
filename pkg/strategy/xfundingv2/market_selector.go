@@ -36,7 +36,11 @@ type MarketSelectionConfig struct {
 type MarketCandidate struct {
 	Symbol string `json:"symbol"`
 
-	LastFundingRate        fixedpoint.Value `json:"lastFundingRate"`
+	LastFundingRate fixedpoint.Value `json:"lastFundingRate"`
+	// FundingIntervalHours is the funding interval in hours (e.g., 8 for 8h funding)
+	// It's normally 8 for the most Binance perpetuals, but some may have different intervals like 4h.
+	// See https://www.binance.com/en/futures/funding-history/perpetual/real-time-funding-rate
+	FundingIntervalHours   int              `json:"fundingIntervalHours"`
 	AnnualizedRate         fixedpoint.Value `json:"annualizedRate"`
 	TakerBuyQuoteVolume24h fixedpoint.Value `json:"takerBuyQuoteVolume24h"`
 	InRangeDepth           fixedpoint.Value `json:"inRangeDepth"`
@@ -46,17 +50,14 @@ type MarketCandidate struct {
 
 // MarketSelector selects the best market based on funding rate and liquidity
 type MarketSelector struct {
-	*MarketSelectionConfig
+	MarketSelectionConfig
 	binanceFutures *binance.Exchange
 	orderBooks     map[string]*types.StreamOrderBook
 	logger         logrus.FieldLogger
 }
 
 // NewMarketSelector creates a new MarketSelector
-func NewMarketSelector(config *MarketSelectionConfig, exchange *binance.Exchange, orderBooks map[string]*types.StreamOrderBook, logger logrus.FieldLogger) *MarketSelector {
-	if config == nil {
-		config = &MarketSelectionConfig{}
-	}
+func NewMarketSelector(config MarketSelectionConfig, exchange *binance.Exchange, orderBooks map[string]*types.StreamOrderBook, logger logrus.FieldLogger) *MarketSelector {
 	return &MarketSelector{
 		MarketSelectionConfig: config,
 		binanceFutures:        exchange,
@@ -66,15 +67,15 @@ func NewMarketSelector(config *MarketSelectionConfig, exchange *binance.Exchange
 }
 
 // RankMarkets returns a ranked list of market candidates
-func (m *MarketSelector) RankMarkets(ctx context.Context, symbols []string) ([]MarketCandidate, error) {
+func (s *MarketSelector) RankMarkets(ctx context.Context, symbols []string) ([]MarketCandidate, error) {
 	// Step 1: Query premium indexes for each symbol
-	indices, err := m.queryFundingRates(ctx, symbols)
+	indices, err := queryFundingRates(ctx, s.binanceFutures, s.logger, symbols)
 	if err != nil {
 		return nil, err
 	}
 
 	// Step 2: Get funding info
-	fundingInfos, err := m.queryFundingInfo(ctx)
+	fundingInfos, err := queryFundingInfo(ctx, s.binanceFutures)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +85,7 @@ func (m *MarketSelector) RankMarkets(ctx context.Context, symbols []string) ([]M
 	// query the volume data
 	takerQuoteVolumes := make(map[string]fixedpoint.Value)
 	for _, symbol := range symbols {
-		takerVals, err := m.binanceFutures.QueryTakerBuySellVolumes(
+		takerVals, err := s.binanceFutures.QueryTakerBuySellVolumes(
 			ctx,
 			symbol,
 			types.Interval1d,
@@ -93,7 +94,7 @@ func (m *MarketSelector) RankMarkets(ctx context.Context, symbols []string) ([]M
 		if err != nil || len(takerVals) == 0 {
 			return nil, err
 		}
-		ticker, err := m.binanceFutures.QueryTicker(ctx, symbol)
+		ticker, err := s.binanceFutures.QueryTicker(ctx, symbol)
 		if err != nil {
 			return nil, err
 		}
@@ -111,12 +112,12 @@ func (m *MarketSelector) RankMarkets(ctx context.Context, symbols []string) ([]M
 		}
 		annualized := AnnualizedRate(idx.LastFundingRate, info.FundingIntervalHours)
 
-		if annualized.Compare(m.MinAnnualizedRate) < 0 {
+		if annualized.Compare(s.MinAnnualizedRate) < 0 {
 			continue
 		}
 
 		// exclude symbols with low liquidity in order book
-		book, ok := m.orderBooks[idx.Symbol]
+		book, ok := s.orderBooks[idx.Symbol]
 		if !ok {
 			continue
 		}
@@ -125,8 +126,8 @@ func (m *MarketSelector) RankMarkets(ctx context.Context, symbols []string) ([]M
 			continue
 		}
 		buyBook := book.SideBook(types.SideTypeBuy)
-		inRangeDepth := buyBook.InPriceRange(bestBid.Price, types.SideTypeBuy, m.DepthRatio).SumDepthInQuote()
-		if inRangeDepth.Compare(m.RequiredQuoteVolume) <= 0 {
+		inRangeDepth := buyBook.InPriceRange(bestBid.Price, types.SideTypeBuy, s.DepthRatio).SumDepthInQuote()
+		if inRangeDepth.Compare(s.RequiredQuoteVolume) <= 0 {
 			continue
 		}
 
@@ -134,12 +135,13 @@ func (m *MarketSelector) RankMarkets(ctx context.Context, symbols []string) ([]M
 		if !ok {
 			continue
 		}
-		if takerQuoteVol.Compare(m.RequiredTakerQuoteVolume24h) < 0 {
+		if takerQuoteVol.Compare(s.RequiredTakerQuoteVolume24h) < 0 {
 			continue
 		}
 
 		candidates = append(candidates, MarketCandidate{
 			Symbol:                 idx.Symbol,
+			FundingIntervalHours:   info.FundingIntervalHours,
 			LastFundingRate:        idx.LastFundingRate,
 			AnnualizedRate:         annualized,
 			TakerBuyQuoteVolume24h: takerQuoteVol,
@@ -153,14 +155,14 @@ func (m *MarketSelector) RankMarkets(ctx context.Context, symbols []string) ([]M
 }
 
 // queryFundingRates queries funding rates for the given symbols
-func (m *MarketSelector) queryFundingRates(ctx context.Context, symbols []string) ([]*types.PremiumIndex, error) {
+func queryFundingRates(ctx context.Context, futuresExchange *binance.Exchange, logger logrus.FieldLogger, symbols []string) ([]*types.PremiumIndex, error) {
 	indices := make([]*types.PremiumIndex, 0, len(symbols))
 
 	for _, symbol := range symbols {
-		idx, err := m.binanceFutures.QueryPremiumIndex(ctx, symbol)
+		idx, err := futuresExchange.QueryPremiumIndex(ctx, symbol)
 		if err != nil || idx == nil {
 			// Log error but continue with other symbols
-			m.logger.WithError(err).Warnf("failed to query latest funding rates for %s", symbol)
+			logger.WithError(err).Warnf("failed to query latest funding rates for %s", symbol)
 			continue
 		}
 		indices = append(indices, idx)
@@ -169,9 +171,9 @@ func (m *MarketSelector) queryFundingRates(ctx context.Context, symbols []string
 	return indices, nil
 }
 
-func (s *MarketSelector) queryFundingInfo(ctx context.Context) (map[string]*binanceapi.FuturesFundingInfo, error) {
+func queryFundingInfo(ctx context.Context, futuresExchange *binance.Exchange) (map[string]*binanceapi.FuturesFundingInfo, error) {
 	m := make(map[string]*binanceapi.FuturesFundingInfo)
-	fundingInfos, err := s.binanceFutures.QueryFuturesFundingInfo(ctx)
+	fundingInfos, err := futuresExchange.QueryFuturesFundingInfo(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +185,7 @@ func (s *MarketSelector) queryFundingInfo(ctx context.Context) (map[string]*bina
 
 // calculateScores calculates composite scores for ranking
 // Score = AnnualizedRate * 0.6 + NormalizedVolume * 0.4
-func (m *MarketSelector) calculateScores(candidates []MarketCandidate) {
+func (s *MarketSelector) calculateScores(candidates []MarketCandidate) {
 	if len(candidates) == 0 {
 		return
 	}
