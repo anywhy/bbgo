@@ -1,15 +1,14 @@
-package grid2
+package grid2types
 
 import (
 	"fmt"
 	"strings"
 
-	"github.com/c9s/bbgo/pkg/fixedpoint"
 	"github.com/c9s/bbgo/pkg/types"
 )
 
 // PinOrderMap store the pin-order's relation, we will change key from string to fixedpoint.Value when FormatString fixed
-type PinOrderMap map[fixedpoint.Value]types.Order
+type PinOrderMap map[Pin]types.Order
 
 // AscendingOrders get the orders from pin order map and sort it in asc order
 func (m PinOrderMap) AscendingOrders() []types.Order {

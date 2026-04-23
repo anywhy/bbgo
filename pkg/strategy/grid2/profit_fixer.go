@@ -9,18 +9,19 @@ import (
 
 	"github.com/c9s/bbgo/pkg/exchange/batch"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
+	"github.com/c9s/bbgo/pkg/strategy/grid2/grid2types"
 	"github.com/c9s/bbgo/pkg/types"
 )
 
 type ProfitFixer struct {
 	symbol         string
-	grid           *Grid
+	grid           *grid2types.Grid
 	historyService types.ExchangeTradeHistoryService
 
 	logger logrus.FieldLogger
 }
 
-func newProfitFixer(grid *Grid, symbol string, historyService types.ExchangeTradeHistoryService) *ProfitFixer {
+func newProfitFixer(grid *grid2types.Grid, symbol string, historyService types.ExchangeTradeHistoryService) *ProfitFixer {
 	return &ProfitFixer{
 		symbol:         symbol,
 		grid:           grid,

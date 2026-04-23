@@ -1,16 +1,12 @@
-package grid2
+package grid2types
 
 import (
 	"fmt"
-	"math"
 	"sort"
 
 	"github.com/c9s/bbgo/pkg/fixedpoint"
 	"github.com/c9s/bbgo/pkg/types"
-	"github.com/c9s/bbgo/pkg/util"
 )
-
-type PinCalculator func() []Pin
 
 type Grid struct {
 	UpperPrice fixedpoint.Value `json:"upperPrice"`
@@ -28,56 +24,11 @@ type Grid struct {
 	// Pins are the pinned grid prices, from low to high
 	Pins []Pin `json:"pins"`
 
-	pinsCache map[Pin]struct{} `json:"-"`
+	// pinsCache is a map of pinned prices, for fast lookup of price.
+	// This is used for checking if a price is pinned.
+	pinsCache PinCacheMap
 
 	calculator PinCalculator
-}
-
-type Pin fixedpoint.Value
-
-func removeDuplicatedPins(pins []Pin) []Pin {
-	var buckets = map[string]struct{}{}
-	var out []Pin
-
-	for _, pin := range pins {
-		p := fixedpoint.Value(pin)
-
-		if _, exists := buckets[p.String()]; exists {
-			continue
-		}
-
-		out = append(out, pin)
-		buckets[p.String()] = struct{}{}
-	}
-
-	return out
-}
-
-func calculateArithmeticPins(lower, upper, spread, tickSize fixedpoint.Value) []Pin {
-	var pins []Pin
-
-	// tickSize number is like 0.01, 0.1, 0.001
-	var ts = tickSize.Float64()
-	var prec = int(math.Round(math.Log10(ts) * -1.0))
-	for p := lower; p.Compare(upper.Sub(spread)) <= 0; p = p.Add(spread) {
-		price := util.RoundAndTruncatePrice(p, prec)
-		pins = append(pins, Pin(price))
-	}
-
-	// this makes sure there is no error at the upper price
-	upperPrice := util.RoundAndTruncatePrice(upper, prec)
-	pins = append(pins, Pin(upperPrice))
-
-	return pins
-}
-
-func buildPinCache(pins []Pin) map[Pin]struct{} {
-	cache := make(map[Pin]struct{}, len(pins))
-	for _, pin := range pins {
-		cache[pin] = struct{}{}
-	}
-
-	return cache
 }
 
 func NewGrid(lower, upper, size, tickSize fixedpoint.Value) *Grid {
@@ -99,11 +50,11 @@ func NewGrid(lower, upper, size, tickSize fixedpoint.Value) *Grid {
 func (g *Grid) CalculateGeometricPins() {
 	g.calculator = func() []Pin {
 		// TODO: implement geometric calculator
-		// return calculateArithmeticPins(g.LowerPrice, g.UpperPrice, g.Spread, g.TickSize)
+		// return CalculateArithmeticPins(g.LowerPrice, g.UpperPrice, g.Spread, g.TickSize)
 		return nil
 	}
 
-	g.addPins(removeDuplicatedPins(g.calculator()))
+	g.addPins(RemoveDuplicatedPins(g.calculator()))
 }
 
 func (g *Grid) CalculateArithmeticPins() {
@@ -111,7 +62,7 @@ func (g *Grid) CalculateArithmeticPins() {
 		one := fixedpoint.NewFromInt(1)
 		height := g.UpperPrice.Sub(g.LowerPrice)
 		spread := height.Div(g.Size.Sub(one))
-		return calculateArithmeticPins(g.LowerPrice, g.UpperPrice, spread, g.TickSize)
+		return CalculateArithmeticPins(g.LowerPrice, g.UpperPrice, spread, g.TickSize)
 	}
 
 	g.addPins(g.calculator())
@@ -195,7 +146,7 @@ func (g *Grid) ExtendUpperPrice(upper fixedpoint.Value) (newPins []Pin) {
 		return nil
 	}
 
-	newPins = calculateArithmeticPins(g.UpperPrice.Add(g.Spread), upper, g.Spread, g.TickSize)
+	newPins = CalculateArithmeticPins(g.UpperPrice.Add(g.Spread), upper, g.Spread, g.TickSize)
 	g.UpperPrice = upper
 	g.addPins(newPins)
 	return newPins
@@ -208,7 +159,7 @@ func (g *Grid) ExtendLowerPrice(lower fixedpoint.Value) (newPins []Pin) {
 
 	n := g.LowerPrice.Sub(lower).Div(g.Spread).Floor()
 	lower = g.LowerPrice.Sub(g.Spread.Mul(n))
-	newPins = calculateArithmeticPins(lower, g.LowerPrice.Sub(g.Spread), g.Spread, g.TickSize)
+	newPins = CalculateArithmeticPins(lower, g.LowerPrice.Sub(g.Spread), g.Spread, g.TickSize)
 
 	g.LowerPrice = lower
 	g.addPins(newPins)
@@ -236,7 +187,7 @@ func (g *Grid) addPins(pins []Pin) {
 }
 
 func (g *Grid) updatePinsCache() {
-	g.pinsCache = buildPinCache(g.Pins)
+	g.pinsCache = BuildPinCache(g.Pins)
 }
 
 func (g *Grid) String() string {

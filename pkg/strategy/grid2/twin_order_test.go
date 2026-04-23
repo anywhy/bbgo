@@ -3,19 +3,21 @@ package grid2
 import (
 	"testing"
 
-	"github.com/c9s/bbgo/pkg/fixedpoint"
-	"github.com/c9s/bbgo/pkg/types"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/c9s/bbgo/pkg/fixedpoint"
+	"github.com/c9s/bbgo/pkg/strategy/grid2/grid2types"
+	"github.com/c9s/bbgo/pkg/types"
 )
 
 func TestTwinOrderBook(t *testing.T) {
 	assert := assert.New(t)
-	pins := []Pin{
-		Pin(fixedpoint.NewFromInt(3)),
-		Pin(fixedpoint.NewFromInt(4)),
-		Pin(fixedpoint.NewFromInt(1)),
-		Pin(fixedpoint.NewFromInt(5)),
-		Pin(fixedpoint.NewFromInt(2)),
+	pins := []grid2types.Pin{
+		grid2types.Pin(fixedpoint.NewFromInt(3)),
+		grid2types.Pin(fixedpoint.NewFromInt(4)),
+		grid2types.Pin(fixedpoint.NewFromInt(1)),
+		grid2types.Pin(fixedpoint.NewFromInt(5)),
+		grid2types.Pin(fixedpoint.NewFromInt(2)),
 	}
 
 	book := newTwinOrderBook(pins)
