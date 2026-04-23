@@ -1423,6 +1423,9 @@ func (s *Strategy) getGrid() *grid2types.Grid {
 }
 
 // scanMissingPinPrices finds the missing grid order prices
+// this is currently only used for debugging
+type PriceMap map[string]fixedpoint.Value
+
 func scanMissingPinPrices(orderBook *bbgo.ActiveOrderBook, pins []grid2types.Pin) PriceMap {
 	// Add all open orders to the local order book
 	gridPrices := make(PriceMap)
