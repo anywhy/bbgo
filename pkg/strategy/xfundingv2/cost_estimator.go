@@ -50,8 +50,8 @@ func (c *CostEstimator) SetTargetPosition(position fixedpoint.Value) *CostEstima
 	return c
 }
 
-// TransactionCost represents the cost of a transaction, either entry or exit
-type TransactionCost struct {
+// EstimatedCost represents the estimated cost of a transaction, either entry or exit
+type EstimatedCost struct {
 	FuturesPosition fixedpoint.Value
 	SpotFee         fixedpoint.Value
 	FuturesFee      fixedpoint.Value
@@ -60,9 +60,9 @@ type TransactionCost struct {
 
 // EstimateEntryCost calculates the cost of entering the position
 // Note that the cost is based on the current order book, the cost is estimated by the time this function is called.
-func (c *CostEstimator) EstimateEntryCost(isMaker bool) (TransactionCost, error) {
+func (c *CostEstimator) EstimateEntryCost(isMaker bool) (EstimatedCost, error) {
 	if c.targetPosition.IsZero() {
-		return TransactionCost{}, nil
+		return EstimatedCost{}, nil
 	}
 	var spotPV, futuresPV types.PriceVolume
 	var spotOk, futuresOk bool
@@ -81,15 +81,15 @@ func (c *CostEstimator) EstimateEntryCost(isMaker bool) (TransactionCost, error)
 	}
 
 	if !spotOk || !futuresOk {
-		return TransactionCost{}, errors.New("order book data is not ready yet")
+		return EstimatedCost{}, errors.New("order book data is not ready yet")
 	}
 
 	return c.estimateCost(isMaker, spotPV.Price, futuresPV.Price), nil
 }
 
-func (c *CostEstimator) EstimateExitCost(isMaker bool) (TransactionCost, error) {
+func (c *CostEstimator) EstimateExitCost(isMaker bool) (EstimatedCost, error) {
 	if c.targetPosition.IsZero() {
-		return TransactionCost{}, nil
+		return EstimatedCost{}, nil
 	}
 
 	var spotPV, futuresPV types.PriceVolume
@@ -105,13 +105,13 @@ func (c *CostEstimator) EstimateExitCost(isMaker bool) (TransactionCost, error) 
 	}
 
 	if !spotOk || !futuresOk {
-		return TransactionCost{}, errors.New("order book data is not ready yet")
+		return EstimatedCost{}, errors.New("order book data is not ready yet")
 	}
 
 	return c.estimateCost(isMaker, spotPV.Price, futuresPV.Price), nil
 }
 
-func (c *CostEstimator) estimateCost(isMaker bool, spotPrice, futuresPrice fixedpoint.Value) TransactionCost {
+func (c *CostEstimator) estimateCost(isMaker bool, spotPrice, futuresPrice fixedpoint.Value) EstimatedCost {
 	priceSpread := spotPrice.Sub(futuresPrice)
 	// note that the c.targetPosition can be positive or negative, the spread PnL is hence:
 	// let positoinSize = c.targetPosition.Abs()
@@ -134,7 +134,7 @@ func (c *CostEstimator) estimateCost(isMaker bool, spotPrice, futuresPrice fixed
 	spotFee := spotPrice.Mul(positionSize).Mul(spotFeeRate)
 	futuresFee := futuresPrice.Mul(positionSize).Mul(futuresFeeRate)
 
-	return TransactionCost{
+	return EstimatedCost{
 		FuturesPosition: c.targetPosition,
 		SpotFee:         spotFee,
 		FuturesFee:      futuresFee,
