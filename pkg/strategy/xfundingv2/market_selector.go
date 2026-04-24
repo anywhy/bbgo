@@ -2,6 +2,7 @@ package xfundingv2
 
 import (
 	"context"
+	"time"
 
 	"github.com/c9s/bbgo/pkg/exchange/binance"
 	"github.com/c9s/bbgo/pkg/exchange/binance/binanceapi"
@@ -10,8 +11,20 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+func getPostionSign(positionType types.PositionType) int {
+	switch positionType {
+	case types.PositionLong:
+		return 1
+	case types.PositionShort:
+		return -1
+	default:
+		return 0
+	}
+}
+
 // MarketSelectionConfig configures the market selection criteria
 type MarketSelectionConfig struct {
+	FuturesDirection types.PositionType `json:"futuresDirection"`
 
 	// Minimum annualized funding rate to consider (e.g., 0.10 = 10%)
 	// recommended to default to 5%
@@ -23,29 +36,50 @@ type MarketSelectionConfig struct {
 	MinCollateralRate fixedpoint.Value `json:"minCollateralRate"`
 
 	// Depth
-	DepthRatio          fixedpoint.Value `json:"depthRatio"`
-	RequiredQuoteVolume fixedpoint.Value `json:"requiredQuoteVolume"`
-
+	DepthRatio                  fixedpoint.Value `json:"depthRatio"`
+	RequiredQuoteVolume         fixedpoint.Value `json:"requiredQuoteVolume"`
 	RequiredTakerQuoteVolume24h fixedpoint.Value `json:"requiredTakerVolume24h"`
 
 	// Top N markets by market cap to consider
 	TopNCap int `json:"topNCap"`
 }
 
+func (c *MarketSelectionConfig) Defaults() {
+	if c.FuturesDirection == "" {
+		c.FuturesDirection = types.PositionShort
+	}
+	if c.MinAnnualizedRate.IsZero() {
+		c.MinAnnualizedRate = fixedpoint.NewFromFloat(0.05) // 5%
+	}
+	if c.MinCollateralRate.IsZero() {
+		c.MinCollateralRate = fixedpoint.NewFromFloat(0.95)
+	}
+	if c.DepthRatio.IsZero() {
+		c.DepthRatio = fixedpoint.NewFromFloat(0.05) // 5% depth
+	}
+	if c.RequiredQuoteVolume.IsZero() {
+		c.RequiredQuoteVolume = fixedpoint.NewFromFloat(100000)
+	}
+	if c.TopNCap == 0 {
+		c.TopNCap = 10
+	}
+}
+
 // MarketCandidate represents a ranked market candidate
 type MarketCandidate struct {
-	Symbol string `json:"symbol"`
+	Symbol string
 
-	LastFundingRate fixedpoint.Value `json:"lastFundingRate"`
+	LastFundingRate fixedpoint.Value
 	// FundingIntervalHours is the funding interval in hours (e.g., 8 for 8h funding)
 	// It's normally 8 for the most Binance perpetuals, but some may have different intervals like 4h.
 	// See https://www.binance.com/en/futures/funding-history/perpetual/real-time-funding-rate
-	FundingIntervalHours   int              `json:"fundingIntervalHours"`
-	AnnualizedRate         fixedpoint.Value `json:"annualizedRate"`
-	TakerBuyQuoteVolume24h fixedpoint.Value `json:"takerBuyQuoteVolume24h"`
-	InRangeDepth           fixedpoint.Value `json:"inRangeDepth"`
+	FundingIntervalHours   int
+	AnnualizedRate         fixedpoint.Value
+	TakerBuyQuoteVolume24h fixedpoint.Value
+	InRangeDepth           fixedpoint.Value
 
-	Score fixedpoint.Value `json:"score"` // maybe later
+	// MinHoldingDuration is the estimated minimum holding interval to break even for this market candidate
+	MinHoldingDuration time.Duration
 }
 
 // MarketSelector selects the best market based on funding rate and liquidity
@@ -99,8 +133,10 @@ func (s *MarketSelector) SelectMarkets(ctx context.Context, symbols []string) ([
 		takerQuoteVolumes[symbol] = takerVals[0].BuyVol.Mul(ticker.Last)
 	}
 	for _, idx := range indices {
-		// Only consider positive funding rates above threshold
-		if idx.LastFundingRate.Sign() <= 0 {
+		// filter by funding rate direction
+		// short futures -> positive funding rate for funding income
+		// long futures -> negative funding rate for funding income
+		if getPostionSign(s.FuturesDirection)*idx.LastFundingRate.Sign() > 0 {
 			continue
 		}
 
@@ -110,7 +146,7 @@ func (s *MarketSelector) SelectMarkets(ctx context.Context, symbols []string) ([
 		}
 		annualized := AnnualizedRate(idx.LastFundingRate, info.FundingIntervalHours)
 
-		if annualized.Compare(s.MinAnnualizedRate) < 0 {
+		if annualized.Abs().Compare(s.MinAnnualizedRate) < 0 {
 			continue
 		}
 

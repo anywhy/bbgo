@@ -58,6 +58,14 @@ type EstimatedCost struct {
 	SpreadPnL       fixedpoint.Value
 }
 
+func (e *EstimatedCost) TotalFeeCost() fixedpoint.Value {
+	return e.SpotFee.Add(e.FuturesFee)
+}
+
+func (e *EstimatedCost) Spread() fixedpoint.Value {
+	return e.SpreadPnL.Div(e.FuturesPosition)
+}
+
 // EstimateEntryCost calculates the cost of entering the position
 // Note that the cost is based on the current order book, the cost is estimated by the time this function is called.
 func (c *CostEstimator) EstimateEntryCost(isMaker bool) (EstimatedCost, error) {
