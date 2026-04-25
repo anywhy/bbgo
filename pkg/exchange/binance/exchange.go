@@ -59,6 +59,15 @@ const WsTestNetWebSocketURL = "wss://testnet.binance.vision/ws-api/v3"
 const WsFuturesWebSocketURL = "wss://ws-fapi.binance.com/ws-fapi/v1"
 const WsTestNetFuturesWebSocketURL = "wss://testnet.binancefuture.com/ws-fapi/v1"
 
+// Futures segmented WebSocket endpoints (new as of 2025-10, replaces deprecated /ws path)
+const FuturesPublicWebSocketURL  = "wss://fstream.binance.com/public"
+const FuturesMarketWebSocketURL  = "wss://fstream.binance.com/market"
+const FuturesPrivateWebSocketURL = "wss://fstream.binance.com/private"
+
+const TestNetFuturesPublicWebSocketURL  = "wss://stream.binancefuture.com/public"
+const TestNetFuturesMarketWebSocketURL  = "wss://stream.binancefuture.com/market"
+const TestNetFuturesPrivateWebSocketURL = "wss://stream.binancefuture.com/private"
+
 // orderLimiter - the default order limiter apply 5 requests per second and a 2 initial bucket
 // this includes SubmitOrder, CancelOrder and QueryClosedOrders
 //

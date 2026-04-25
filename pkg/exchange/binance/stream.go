@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/sirupsen/logrus"
 
 	"github.com/c9s/bbgo/pkg/depth"
@@ -120,6 +121,13 @@ type Stream struct {
 	listenToken           string
 	listenTokenExpiration time.Time
 	once                  util.Reonce
+
+	// futuresAuxStream handles /public subscriptions (depth, bookTicker) when the main
+	// stream connects to /market. Only created for futures PublicOnly streams with mixed
+	// subscription types. nil when not needed.
+	futuresAuxStream  *types.StandardStream
+	futuresPublicSubs []types.Subscription // cached /public subscriptions
+	futuresMarketSubs []types.Subscription // cached /market subscriptions
 }
 
 func NewStream(ex *Exchange, client *binance.Client, futuresClient *futures.Client) *Stream {
@@ -256,8 +264,30 @@ func (s *Stream) handleBeforeConnect(ctx context.Context) error {
 
 func (s *Stream) handleConnect() {
 	if s.PublicOnly {
-		if err := s.writeSubscriptions(); err != nil {
-			log.WithError(err).Error("subscribe error")
+		if s.exchange.IsFutures {
+			// Determine which subscriptions to send on the main connection:
+			//   - mixed or market-only → main conn is /market → send futuresMarketSubs
+			//   - public-only (depth/bookTicker only) → main conn is /public → send futuresPublicSubs
+			mainSubs := s.futuresMarketSubs
+			if s.futuresAuxStream == nil && len(s.futuresPublicSubs) > 0 {
+				mainSubs = s.futuresPublicSubs
+			}
+			if err := s.writeSpecificSubscriptions(s.Conn, mainSubs); err != nil {
+				log.WithError(err).Error("futures subscribe error")
+			}
+			// if mixed subscriptions, connect aux stream to /public independently
+			if s.futuresAuxStream != nil {
+				connCtx := s.ConnCtx
+				go func() {
+					if err := s.futuresAuxStream.DialAndConnect(connCtx); err != nil {
+						log.WithError(err).Error("futures aux stream (/public) connect error")
+					}
+				}()
+			}
+		} else {
+			if err := s.writeSubscriptions(); err != nil {
+				log.WithError(err).Error("subscribe error")
+			}
 		}
 	} else if s.canUseWsApiEndpoint() {
 
@@ -267,7 +297,7 @@ func (s *Stream) handleConnect() {
 
 		time.Sleep(1 * time.Second)
 
-		// futures does
+		// futures does not support ed25519 login on WsApi
 		if !s.exchange.IsFutures {
 			if err := s.sendSubscribeUserDataStreamCommand(); err != nil {
 				log.WithError(err).Error("subscribe user data stream error")
@@ -295,6 +325,20 @@ func (s *Stream) handleConnect() {
 		// spawn a goroutine to emit auth event to prevent blocking the main event loop
 		go s.EmitAuth()
 	}
+}
+
+// Close closes the stream and, if present, the auxiliary futures /public stream.
+func (s *Stream) Close() error {
+	s.ConnLock.Lock()
+	auxStream := s.futuresAuxStream
+	s.ConnLock.Unlock()
+
+	if auxStream != nil {
+		if err := auxStream.Close(); err != nil {
+			log.WithError(err).Warn("futures aux stream close error")
+		}
+	}
+	return s.StandardStream.Close()
 }
 
 // sendEd25519LoginCommand
@@ -342,25 +386,48 @@ func (s *Stream) sendListenTokenSubscribeCommand() error {
 	})
 }
 
-// writeSubscriptions send the subscription command to the websocket
-// server in order to establish the connection to market data sources
-func (s *Stream) writeSubscriptions() error {
-	var params []string
-	for _, subscription := range s.Subscriptions {
-		params = append(params, convertSubscription(subscription))
-	}
-	if len(params) == 0 {
+// writeSpecificSubscriptions sends a SUBSCRIBE command for a given set of subscriptions
+// on the provided connection. Returns nil without writing if subs is empty or conn is nil.
+func (s *Stream) writeSpecificSubscriptions(conn *websocket.Conn, subs []types.Subscription) error {
+	if len(subs) == 0 {
 		return nil
 	}
-
+	var params []string
+	for _, subscription := range subs {
+		params = append(params, convertSubscription(subscription))
+	}
 	// TODO: handle subscribe response
 	// sample response: {"result":null,"id":2}
 	log.Infof("subscribing channels: %+v", params)
-	return s.Conn.WriteJSON(&WebSocketCommand{
+	return conn.WriteJSON(&WebSocketCommand{
 		Method: "SUBSCRIBE",
 		Params: params,
 		ID:     2,
 	})
+}
+
+// writeSubscriptions sends a SUBSCRIBE command for all of s.Subscriptions.
+func (s *Stream) writeSubscriptions() error {
+	return s.writeSpecificSubscriptions(s.Conn, s.Subscriptions)
+}
+
+// initFuturesAuxStream creates the auxiliary StandardStream that connects to the futures
+// /public endpoint. It shares the same parser and dispatcher as the main stream so that
+// events are delivered through the same callback system.
+// Only called once; handleConnect guards with futuresAuxStream != nil check.
+func (s *Stream) initFuturesAuxStream() {
+	aux := types.NewStandardStream()
+	aux.SetParser(parseWebSocketEvent)
+	aux.SetDispatcher(s.dispatchEvent)
+	aux.SetEndpointCreator(func(ctx context.Context) (string, error) {
+		return s.getFuturesPublicEndpointUrl(), nil
+	})
+	aux.OnConnect(func() {
+		if err := s.writeSpecificSubscriptions(aux.Conn, s.futuresPublicSubs); err != nil {
+			log.WithError(err).Error("futures aux stream /public subscribe error")
+		}
+	})
+	s.futuresAuxStream = &aux
 }
 
 func (s *Stream) handleContinuousKLineEvent(e *ContinuousKLineEvent) {
@@ -509,11 +576,22 @@ func (s *Stream) handleOrderTradeUpdateEvent(e *OrderTradeUpdateEvent) {
 
 func (s *Stream) getPublicEndpointUrl() string {
 	if s.exchange.IsFutures {
-		if testNet {
-			return TestNetFuturesBaseURL + "/ws"
+		s.futuresPublicSubs, s.futuresMarketSubs = classifyFuturesSubscriptions(s.Subscriptions)
+		if len(s.futuresPublicSubs) > 0 && len(s.futuresMarketSubs) > 0 {
+			// Mixed: main stream → /market, aux stream → /public (init once)
+			if s.futuresAuxStream == nil {
+				s.initFuturesAuxStream()
+			}
+
+			return s.getFuturesMarketEndpointUrl()
+		} else if len(s.futuresPublicSubs) > 0 {
+
+			// Only depth/bookTicker subscriptions
+			return s.getFuturesPublicEndpointUrl()
 		}
 
-		return FuturesWebSocketURL + "/ws"
+		// Only market subscriptions (or no subscriptions yet)
+		return s.getFuturesMarketEndpointUrl()
 	} else if isBinanceUs() {
 		if testNet {
 			return BinanceTestBaseURL + "/ws"
@@ -531,6 +609,10 @@ func (s *Stream) getPublicEndpointUrl() string {
 }
 
 func (s *Stream) getUserDataStreamEndpointUrl(listenKey string) string {
+	if s.exchange.IsFutures {
+		return s.getFuturesPrivateEndpointUrl(listenKey)
+	}
+
 	u := s.getPublicEndpointUrl()
 	return u + "/" + listenKey
 }
@@ -878,4 +960,55 @@ func (s *Stream) handleAlgoOrderUpdateEvent(e *AlgoOrderUpdateEvent) {
 	}
 
 	s.EmitOrderUpdate(*order)
+}
+
+// isFuturesPublicChannel reports whether a channel belongs to the /public endpoint.
+// The /public endpoint handles high-frequency data: depth and bookTicker.
+// All other channels belong to the /market endpoint.
+func isFuturesPublicChannel(ch types.Channel) bool {
+	switch ch {
+	case types.BookChannel, types.BookTickerChannel:
+		return true
+	}
+	return false
+}
+
+// classifyFuturesSubscriptions splits subscriptions into /public and /market groups.
+func classifyFuturesSubscriptions(subs []types.Subscription) (public, market []types.Subscription) {
+	for _, s := range subs {
+		if isFuturesPublicChannel(s.Channel) {
+			public = append(public, s)
+		} else {
+			market = append(market, s)
+		}
+	}
+	return
+}
+
+func (s *Stream) getFuturesPublicEndpointUrl() string {
+	if testNet {
+		return TestNetFuturesPublicWebSocketURL + "/ws"
+	}
+	return FuturesPublicWebSocketURL + "/ws"
+}
+
+func (s *Stream) getFuturesMarketEndpointUrl() string {
+	if testNet {
+		return TestNetFuturesMarketWebSocketURL + "/ws"
+	}
+	return FuturesMarketWebSocketURL + "/ws"
+}
+
+// futuresPrivateStreamEvents lists the user data stream events to subscribe on the new
+// /private endpoint. The &events= parameter is required — omitting it causes Binance to
+// push listenKeyExpired immediately after connecting.
+// Ref: https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Important-WebSocket-Change-Notice
+const futuresPrivateStreamEvents = "ORDER_TRADE_UPDATE/TRADE_LITE/ACCOUNT_UPDATE/ACCOUNT_CONFIG_UPDATE/MARGIN_CALL/ALGO_UPDATE"
+
+func (s *Stream) getFuturesPrivateEndpointUrl(listenKey string) string {
+	base := FuturesPrivateWebSocketURL
+	if testNet {
+		base = TestNetFuturesPrivateWebSocketURL
+	}
+	return base + "/ws?listenKey=" + listenKey + "&events=" + futuresPrivateStreamEvents
 }
