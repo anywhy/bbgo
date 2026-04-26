@@ -440,7 +440,15 @@ func (s *Strategy) calculateMinHoldingIntervals(candidate MarketCandidate, bestP
 	if err != nil {
 		return fixedpoint.Zero, err
 	}
-	totalCost := estimateEntryCost.TotalFeeCost().Add(estimateEntryCost.SpreadPnL)
+	estimateExitCost, err := costEstimator.EstimateExitCost(true)
+	if err != nil {
+		return fixedpoint.Zero, err
+	}
+	totalCost := estimateEntryCost.
+		TotalFeeCost().
+		Add(estimateEntryCost.SpreadPnL).
+		Add(estimateExitCost.TotalFeeCost()).
+		Add(estimateExitCost.SpreadPnL)
 	amount := targetPosition.Abs().Mul(bestPrice)
 	estimateFundingFeePerInterval := amount.Mul(candidate.LastFundingRate.Abs())
 	if estimateFundingFeePerInterval.IsZero() {

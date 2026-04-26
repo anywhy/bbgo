@@ -58,10 +58,13 @@ type EstimatedCost struct {
 	SpreadPnL       fixedpoint.Value
 }
 
+// TotalFeeCost returns the total trading fee cost (spot fee + futures fee) in quote currency
 func (e *EstimatedCost) TotalFeeCost() fixedpoint.Value {
 	return e.SpotFee.Add(e.FuturesFee)
 }
 
+// Spread returns the price difference between spot and futures
+// i.e spread = spot price - futures price
 func (e *EstimatedCost) Spread() fixedpoint.Value {
 	return e.SpreadPnL.Div(e.FuturesPosition)
 }
