@@ -16,23 +16,15 @@ func AnnualizedRate(fundingRate fixedpoint.Value, fundingIntervalHours int) fixe
 }
 
 type CostEstimator struct {
-	market types.Market
-
 	// targetPosition is the open position size in futures (can be positive or negative)
 	// the open position size in spot is always the same but with opposite sign
 	targetPosition fixedpoint.Value
 
-	futuresOrderBook, spotOrderBook *types.StreamOrderBook
-
 	futuresFeeRate, spotFeeRate types.ExchangeFee
 }
 
-func NewCostEstimator(market types.Market, futuresOrderBook, spotOrderBook *types.StreamOrderBook) *CostEstimator {
-	return &CostEstimator{
-		market:           market,
-		futuresOrderBook: futuresOrderBook,
-		spotOrderBook:    spotOrderBook,
-	}
+func NewCostEstimator() *CostEstimator {
+	return &CostEstimator{}
 }
 
 func (c *CostEstimator) SetFuturesFeeRate(feeRate types.ExchangeFee) *CostEstimator {
@@ -70,8 +62,7 @@ func (e *EstimatedCost) Spread() fixedpoint.Value {
 }
 
 // EstimateEntryCost calculates the cost of entering the position
-// Note that the cost is based on the current order book, the cost is estimated by the time this function is called.
-func (c *CostEstimator) EstimateEntryCost(isMaker bool) (EstimatedCost, error) {
+func (c *CostEstimator) EstimateEntryCost(isMaker bool, spotOrderBook, futuresOrderBook types.OrderBook) (EstimatedCost, error) {
 	if c.targetPosition.IsZero() {
 		return EstimatedCost{}, nil
 	}
@@ -80,15 +71,15 @@ func (c *CostEstimator) EstimateEntryCost(isMaker bool) (EstimatedCost, error) {
 	if c.targetPosition.Sign() < 0 {
 		// short futures, long spot
 		// buy spot at best ask
-		spotPV, spotOk = c.spotOrderBook.BestAsk()
+		spotPV, spotOk = spotOrderBook.BestAsk()
 		// sell futures at best bid
-		futuresPV, futuresOk = c.futuresOrderBook.BestBid()
+		futuresPV, futuresOk = futuresOrderBook.BestBid()
 	} else {
 		// long futures, short spot
 		// sell spot at best bid
-		spotPV, spotOk = c.spotOrderBook.BestBid()
+		spotPV, spotOk = spotOrderBook.BestBid()
 		// buy futures at best ask
-		futuresPV, futuresOk = c.futuresOrderBook.BestAsk()
+		futuresPV, futuresOk = futuresOrderBook.BestAsk()
 	}
 
 	if !spotOk || !futuresOk {
@@ -98,7 +89,7 @@ func (c *CostEstimator) EstimateEntryCost(isMaker bool) (EstimatedCost, error) {
 	return c.estimateCost(isMaker, spotPV.Price, futuresPV.Price), nil
 }
 
-func (c *CostEstimator) EstimateExitCost(isMaker bool) (EstimatedCost, error) {
+func (c *CostEstimator) EstimateExitCost(isMaker bool, spotOrderBook, futuresOrderBook types.OrderBook) (EstimatedCost, error) {
 	if c.targetPosition.IsZero() {
 		return EstimatedCost{}, nil
 	}
@@ -107,12 +98,12 @@ func (c *CostEstimator) EstimateExitCost(isMaker bool) (EstimatedCost, error) {
 	var spotOk, futuresOk bool
 	if c.targetPosition.Sign() < 0 {
 		// long futures, short spot to close
-		spotPV, spotOk = c.spotOrderBook.BestBid()          // sell spot at best bid
-		futuresPV, futuresOk = c.futuresOrderBook.BestAsk() // buy futures at best ask
+		spotPV, spotOk = spotOrderBook.BestBid()          // sell spot at best bid
+		futuresPV, futuresOk = futuresOrderBook.BestAsk() // buy futures at best ask
 	} else {
 		// short futures, long spot to close
-		spotPV, spotOk = c.spotOrderBook.BestAsk()          // buy spot at best ask
-		futuresPV, futuresOk = c.futuresOrderBook.BestBid() // sell futures at best bid
+		spotPV, spotOk = spotOrderBook.BestAsk()          // buy spot at best ask
+		futuresPV, futuresOk = futuresOrderBook.BestBid() // sell futures at best bid
 	}
 
 	if !spotOk || !futuresOk {

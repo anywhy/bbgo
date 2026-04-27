@@ -48,7 +48,7 @@ type Strategy struct {
 	spotMarkets, futuresMarkets       types.MarketMap
 	spotSession, futuresSession       *bbgo.ExchangeSession
 	candidateSymbols                  []string
-	costEstimators                    map[string]*CostEstimator
+	costEstimator                     *CostEstimator
 	preliminaryMarketSelector         *MarketSelector
 
 	coinmarketcapClient *coinmarketcap.DataSource
@@ -99,7 +99,7 @@ func (s *Strategy) Initialize() error {
 	}
 	s.futuresOrderBooks = make(map[string]*types.StreamOrderBook)
 	s.spotOrderBooks = make(map[string]*types.StreamOrderBook)
-	s.costEstimators = make(map[string]*CostEstimator)
+
 	return nil
 }
 
@@ -160,6 +160,18 @@ func (s *Strategy) CrossRun(
 	}
 	s.futuresMarkets = futuresMarkets
 
+	// initialize cost estimator
+	s.costEstimator = NewCostEstimator()
+	s.costEstimator.
+		SetFuturesFeeRate(types.ExchangeFee{
+			MakerFeeRate: s.futuresSession.MakerFeeRate,
+			TakerFeeRate: s.futuresSession.TakerFeeRate,
+		}).
+		SetSpotFeeRate(types.ExchangeFee{
+			MakerFeeRate: s.spotSession.MakerFeeRate,
+			TakerFeeRate: s.spotSession.TakerFeeRate,
+		})
+
 	// static filters
 	var candidateSymbols []string
 	// 1. should be listed on both spot and futures
@@ -202,24 +214,6 @@ func (s *Strategy) CrossRun(
 		spotBook.BindStream(spotStream)
 		spotStream.Subscribe(types.BookChannel, symbol, types.SubscribeOptions{})
 		s.spotOrderBooks[symbol] = spotBook
-
-		market, ok := s.futuresMarkets[symbol]
-		if !ok {
-			return fmt.Errorf("market %s not found in futures markets", symbol)
-		}
-		costEstimator := NewCostEstimator(
-			market, futuresBook, spotBook,
-		)
-		costEstimator.
-			SetFuturesFeeRate(types.ExchangeFee{
-				MakerFeeRate: s.futuresSession.MakerFeeRate,
-				TakerFeeRate: s.futuresSession.TakerFeeRate,
-			}).
-			SetSpotFeeRate(types.ExchangeFee{
-				MakerFeeRate: s.spotSession.MakerFeeRate,
-				TakerFeeRate: s.spotSession.TakerFeeRate,
-			})
-		s.costEstimators[symbol] = costEstimator
 	}
 	if err := futureStream.Connect(ctx); err != nil {
 		return fmt.Errorf("failed to connect future stream books: %w", err)
@@ -434,13 +428,20 @@ func (s *Strategy) selectMostPorfitableMarket(candidates []MarketCandidate) (*Ma
 }
 
 func (s *Strategy) calculateMinHoldingIntervals(candidate MarketCandidate, bestPrice, targetPosition fixedpoint.Value) (fixedpoint.Value, error) {
-	costEstimator := s.costEstimators[candidate.Symbol]
-	costEstimator.SetTargetPosition(targetPosition)
-	estimateEntryCost, err := costEstimator.EstimateEntryCost(true)
+	s.costEstimator.SetTargetPosition(targetPosition)
+	spotOrderBook, spotFound := s.spotOrderBooks[candidate.Symbol]
+	futuresOrderBook, futuresFound := s.futuresOrderBooks[candidate.Symbol]
+	if !spotFound || !futuresFound {
+		return fixedpoint.Zero, errors.New("order book not found for candidate symbol")
+	}
+	spotOrderBookSnapshot := spotOrderBook.Copy()
+	futuresOrderBookShapshot := futuresOrderBook.Copy()
+
+	estimateEntryCost, err := s.costEstimator.EstimateEntryCost(true, spotOrderBookSnapshot, futuresOrderBookShapshot)
 	if err != nil {
 		return fixedpoint.Zero, err
 	}
-	estimateExitCost, err := costEstimator.EstimateExitCost(true)
+	estimateExitCost, err := s.costEstimator.EstimateExitCost(true, spotOrderBookSnapshot, futuresOrderBookShapshot)
 	if err != nil {
 		return fixedpoint.Zero, err
 	}
