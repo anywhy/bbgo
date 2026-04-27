@@ -45,3 +45,12 @@ func AggregateTradesQuoteQuantity(trades []types.Trade) fixedpoint.Value {
 
 	return quoteQuantity
 }
+
+func AveragePriceFromTrades(trades []types.Trade) fixedpoint.Value {
+	if len(trades) == 0 {
+		return fixedpoint.Zero
+	}
+	totalQuoteQuantity := AggregateTradesQuoteQuantity(trades)
+	totalQuantity := AggregateTradesQuantity(trades)
+	return totalQuoteQuantity.Div(totalQuantity)
+}
