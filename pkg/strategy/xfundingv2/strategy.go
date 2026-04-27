@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/c9s/bbgo/pkg/bbgo"
 	"github.com/c9s/bbgo/pkg/datasource/coinmarketcap"
+	"github.com/c9s/bbgo/pkg/exchange/binance"
+	"github.com/c9s/bbgo/pkg/fixedpoint"
 	"github.com/c9s/bbgo/pkg/types"
 	"github.com/sirupsen/logrus"
 )
@@ -31,7 +34,10 @@ type Strategy struct {
 	// CandidateSymbols is the list of symbols to consider for selection
 	// IMPORTANT: xfundingv2 is now assuming trading on U-major pairs
 	CandidateSymbols []string `json:"candidateSymbols"`
-	TickSymbol       string   `json:"tickSymbol"` // symbol used for ticking the strategy, default to the first candidate symbol
+
+	// TickSymbol is the symbol used for ticking the strategy, default to the first candidate symbol
+	TickSymbol string `json:"tickSymbol"`
+
 	// Market selection criteria
 	MarketSelectionConfig *MarketSelectionConfig `json:"marketSelection,omitempty"`
 
@@ -41,6 +47,9 @@ type Strategy struct {
 	futuresOrderBooks, spotOrderBooks map[string]*types.StreamOrderBook
 	spotMarkets, futuresMarkets       types.MarketMap
 	spotSession, futuresSession       *bbgo.ExchangeSession
+	candidateSymbols                  []string
+	costEstimator                     *CostEstimator
+	preliminaryMarketSelector         *MarketSelector
 
 	coinmarketcapClient *coinmarketcap.DataSource
 	mu                  sync.Mutex
@@ -64,9 +73,16 @@ func (s *Strategy) Defaults() error {
 	if len(s.CandidateSymbols) == 0 {
 		return errors.New("empty candidateSymbols")
 	}
+
 	if s.TickSymbol == "" {
 		s.TickSymbol = s.CandidateSymbols[0]
 	}
+
+	if s.MarketSelectionConfig == nil {
+		s.MarketSelectionConfig = &MarketSelectionConfig{}
+	}
+	s.MarketSelectionConfig.Defaults()
+
 	return nil
 }
 
@@ -83,13 +99,11 @@ func (s *Strategy) Initialize() error {
 	}
 	s.futuresOrderBooks = make(map[string]*types.StreamOrderBook)
 	s.spotOrderBooks = make(map[string]*types.StreamOrderBook)
+
 	return nil
 }
 
 func (s *Strategy) Validate() error {
-	if s.MarketSelectionConfig == nil {
-		return errors.New("marketSelection config is required")
-	}
 	if len(s.CandidateSymbols) == 0 {
 		return errors.New("candidateSymbols is required")
 	}
@@ -98,17 +112,21 @@ func (s *Strategy) Validate() error {
 }
 
 func (s *Strategy) CrossSubscribe(sessions map[string]*bbgo.ExchangeSession) {
-	spotSession := sessions[s.SpotSession]
-	futuresSession := sessions[s.FuturesSession]
-
-	for _, symbol := range s.CandidateSymbols {
-		spotSession.Subscribe(types.KLineChannel, symbol, types.SubscribeOptions{Interval: types.Interval1m})
-		spotSession.Subscribe(types.BookChannel, symbol, types.SubscribeOptions{})
-		futuresSession.Subscribe(types.KLineChannel, symbol, types.SubscribeOptions{Interval: types.Interval1m})
-		futuresSession.Subscribe(types.BookChannel, symbol, types.SubscribeOptions{})
+	spotSession, ok := sessions[s.SpotSession]
+	if !ok {
+		s.logger.Warnf("spot session %s not found, skip subscription", s.SpotSession)
+		return
 	}
-	spotSession.Subscribe(types.MarketTradeChannel, s.TickSymbol, types.SubscribeOptions{})
-	futuresSession.Subscribe(types.MarketTradeChannel, s.TickSymbol, types.SubscribeOptions{})
+	futuresSession, ok := sessions[s.FuturesSession]
+	if !ok {
+		s.logger.Warnf("futures session %s not found, skip subscription", s.FuturesSession)
+		return
+	}
+
+	for _, sess := range []*bbgo.ExchangeSession{spotSession, futuresSession} {
+		sess.Subscribe(types.KLineChannel, s.TickSymbol, types.SubscribeOptions{Interval: types.Interval1m})
+		sess.Subscribe(types.MarketTradeChannel, s.TickSymbol, types.SubscribeOptions{})
+	}
 }
 
 func (s *Strategy) CrossRun(
@@ -142,6 +160,18 @@ func (s *Strategy) CrossRun(
 	}
 	s.futuresMarkets = futuresMarkets
 
+	// initialize cost estimator
+	s.costEstimator = NewCostEstimator()
+	s.costEstimator.
+		SetFuturesFeeRate(types.ExchangeFee{
+			MakerFeeRate: s.futuresSession.MakerFeeRate,
+			TakerFeeRate: s.futuresSession.TakerFeeRate,
+		}).
+		SetSpotFeeRate(types.ExchangeFee{
+			MakerFeeRate: s.spotSession.MakerFeeRate,
+			TakerFeeRate: s.spotSession.TakerFeeRate,
+		})
+
 	// static filters
 	var candidateSymbols []string
 	// 1. should be listed on both spot and futures
@@ -154,6 +184,8 @@ func (s *Strategy) CrossRun(
 	if len(candidateSymbols) == 0 {
 		return errors.New("no candidate symbols after filtering")
 	}
+
+	s.candidateSymbols = candidateSymbols
 
 	// subscribe BNB pairs for trading fee calculation
 	quoteCurrencies := make(map[string]struct{})
@@ -190,36 +222,45 @@ func (s *Strategy) CrossRun(
 		return fmt.Errorf("failed to connect spot stream books: %w", err)
 	}
 
-	s.spotSession.MarketDataStream.OnMarketTrade(types.TradeWith(s.TickSymbol, func(trade types.Trade) {
-		s.tick(trade.Time.Time())
-	}))
-	s.futuresSession.MarketDataStream.OnMarketTrade(types.TradeWith(s.TickSymbol, func(trade types.Trade) {
-		s.tick(trade.Time.Time())
-	}))
+	binanceEx, ok := s.futuresSession.Exchange.(*binance.Exchange)
+	s.preliminaryMarketSelector = NewMarketSelector(*s.MarketSelectionConfig, binanceEx, s.logger)
+
+	for _, sess := range []*bbgo.ExchangeSession{s.spotSession, s.futuresSession} {
+		sess.MarketDataStream.OnMarketTrade(types.TradeWith(s.TickSymbol, func(trade types.Trade) {
+			s.tick(ctx, trade.Time.Time())
+		}))
+		sess.MarketDataStream.OnKLineClosed(types.KLineWith(s.TickSymbol, types.Interval1m, func(kline types.KLine) {
+			s.tick(ctx, kline.EndTime.Time())
+		}))
+	}
 
 	return nil
 }
 
-func (s *Strategy) tick(tickTime time.Time) {
+func (s *Strategy) tick(ctx context.Context, tickTime time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.checkRoundStartTime.IsZero() {
+	if s.checkRoundStartTime.IsZero() || s.currentTime.IsZero() {
 		s.checkRoundStartTime = tickTime
+		s.currentTime = tickTime
 		return
 	}
+	// from now on, s.checkRoundStartTime and s.currentTime are not zero
 
-	if !s.currentTime.IsZero() && tickTime.Before(s.currentTime) {
+	// skip tick that's before current time
+	if tickTime.Before(s.currentTime) {
 		return
 	}
 	s.currentTime = tickTime
 
+	// check if it's time to check for new round
 	if s.currentTime.Sub(s.checkRoundStartTime) < s.CheckInterval {
 		return
 	}
 
-	// 1. check if any open round needs to be closed
-	// 2. check if new round can be opened
+	// start processing
+	s.process(ctx)
 
 	// check interval done, reset and start new check interval
 	s.checkRoundStartTime = s.currentTime
@@ -292,4 +333,128 @@ func (s *Strategy) filterMarketCollateralRate(ctx context.Context, symbols []str
 		}
 	}
 	return candidateSymbols
+}
+
+func (s *Strategy) process(ctx context.Context) {
+	// 1. check if there is any active round needs to be closed
+	// TODO: implement round management and closing logic
+
+	// 2. check if new round can be opened or existing round needs to be adjusted
+	candidates, err := s.preliminaryMarketSelector.SelectMarkets(ctx, s.candidateSymbols)
+	if err != nil {
+		s.logger.WithError(err).Error("failed to select market candidates")
+		return
+	}
+	if len(candidates) == 0 {
+		// no candidates, nothing to do in this round
+		return
+	}
+
+	selectedCandidate, _ := s.selectMostPorfitableMarket(candidates)
+	if selectedCandidate == nil {
+		// no profitable candidate found, nothing to do in this round
+		return
+	}
+	// TODO: implement round opening logic with the selected candidate
+}
+
+// selectMostProfitableMarket selects the most profitable market among the candidates based on the estimated break-even holding intervals
+// it will also return the target position for the futures trade
+// the most profitable market is the one with the shortest break-even holding intervals
+func (s *Strategy) selectMostPorfitableMarket(candidates []MarketCandidate) (*MarketCandidate, fixedpoint.Value) {
+	if len(candidates) == 0 {
+		return nil, fixedpoint.Zero
+	}
+	spotAccount := s.spotSession.GetAccount()
+	breakevenIntervals := make(map[string]fixedpoint.Value)
+	targetPositions := make(map[string]fixedpoint.Value)
+	for _, candidate := range candidates {
+		spotMarket := s.spotMarkets[candidate.Symbol]
+		if s.MarketSelectionConfig.FuturesDirection == types.PositionShort {
+			// long spot -> find the amount for the quote currency
+			quoteBalance, ok := spotAccount.Balance(spotMarket.QuoteCurrency)
+			if !ok {
+				continue
+			}
+			// long spot -> trade on the sell side of the order book
+			sellBook := s.spotOrderBooks[candidate.Symbol].SideBook(types.SideTypeSell)
+			spotPrice := sellBook.AverageDepthPriceByQuote(quoteBalance.Available, 0)
+			targetSize := quoteBalance.Available.Div(spotPrice)
+			// short futures -> trade on the buy side of the order book
+			buyBook := s.futuresOrderBooks[candidate.Symbol].SideBook(types.SideTypeBuy)
+			futuresPrice := buyBook.AverageDepthPrice(targetSize)
+			// short futures -> target future position should be negative
+			breakEvenIntervals, err := s.calculateMinHoldingIntervals(candidate, futuresPrice, targetSize.Neg())
+			if err != nil {
+				continue
+			}
+			breakevenIntervals[candidate.Symbol] = breakEvenIntervals
+			targetPositions[candidate.Symbol] = targetSize.Neg()
+		} else if s.MarketSelectionConfig.FuturesDirection == types.PositionLong {
+			baseBalance, ok := spotAccount.Balance(spotMarket.BaseCurrency)
+			if !ok {
+				continue
+			}
+			targetSize := baseBalance.Available
+			// long futures -> trade on the sell side of the order book
+			sellBook := s.futuresOrderBooks[candidate.Symbol].SideBook(types.SideTypeSell)
+			futuresPrice := sellBook.AverageDepthPrice(targetSize)
+			// long futures -> target future position should be positive
+			breakEvenIntervals, err := s.calculateMinHoldingIntervals(candidate, futuresPrice, targetSize)
+			if err != nil {
+				continue
+			}
+			breakevenIntervals[candidate.Symbol] = breakEvenIntervals
+			targetPositions[candidate.Symbol] = targetSize
+		} else {
+			return nil, fixedpoint.Zero
+		}
+	}
+	if len(breakevenIntervals) == 0 {
+		return nil, fixedpoint.Zero
+	}
+	sortedCandidates := candidates
+	sort.Slice(sortedCandidates, func(i, j int) bool {
+		candidate1 := sortedCandidates[i]
+		candidate2 := sortedCandidates[j]
+		return breakevenIntervals[candidate1.Symbol].Compare(breakevenIntervals[candidate2.Symbol]) <= 0
+	})
+	bestCandidate := &sortedCandidates[0]
+	targetPosition := targetPositions[bestCandidate.Symbol]
+	// set the estimated min holding interval for the selected candidate
+	numHoldingHours := breakevenIntervals[bestCandidate.Symbol].Int() * bestCandidate.FundingIntervalHours
+	bestCandidate.MinHoldingDuration = time.Duration(numHoldingHours) * time.Hour
+	return bestCandidate, targetPosition
+}
+
+func (s *Strategy) calculateMinHoldingIntervals(candidate MarketCandidate, bestPrice, targetPosition fixedpoint.Value) (fixedpoint.Value, error) {
+	s.costEstimator.SetTargetPosition(targetPosition)
+	spotOrderBook, spotFound := s.spotOrderBooks[candidate.Symbol]
+	futuresOrderBook, futuresFound := s.futuresOrderBooks[candidate.Symbol]
+	if !spotFound || !futuresFound {
+		return fixedpoint.Zero, errors.New("order book not found for candidate symbol")
+	}
+	spotOrderBookSnapshot := spotOrderBook.Copy()
+	futuresOrderBookShapshot := futuresOrderBook.Copy()
+
+	estimateEntryCost, err := s.costEstimator.EstimateEntryCost(true, spotOrderBookSnapshot, futuresOrderBookShapshot)
+	if err != nil {
+		return fixedpoint.Zero, err
+	}
+	estimateExitCost, err := s.costEstimator.EstimateExitCost(true, spotOrderBookSnapshot, futuresOrderBookShapshot)
+	if err != nil {
+		return fixedpoint.Zero, err
+	}
+	totalCost := estimateEntryCost.
+		TotalFeeCost().
+		Add(estimateEntryCost.SpreadPnL).
+		Add(estimateExitCost.TotalFeeCost()).
+		Add(estimateExitCost.SpreadPnL)
+	amount := targetPosition.Abs().Mul(bestPrice)
+	estimateFundingFeePerInterval := amount.Mul(candidate.LastFundingRate.Abs())
+	if estimateFundingFeePerInterval.IsZero() {
+		return fixedpoint.Zero, nil
+	}
+	breakEvenIntervals := totalCost.Div(estimateFundingFeePerInterval).Round(0, fixedpoint.Up)
+	return breakEvenIntervals, nil
 }
