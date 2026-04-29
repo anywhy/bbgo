@@ -150,3 +150,37 @@ func Test_storePersistenceFields(t *testing.T) {
 	}
 
 }
+
+func Test_persistenceMapWithPointers(t *testing.T) {
+	pss := preparePersistentServices()
+
+	for _, ps := range pss {
+		psName := reflect.TypeOf(ps).Elem().String()
+		t.Run(psName, func(t *testing.T) {
+			original := map[string]*types.Position{
+				"BTCUSDT": types.NewPosition("BTCUSDT", "BTC", "USDT"),
+				"ETHUSDT": types.NewPosition("ETHUSDT", "ETH", "USDT"),
+			}
+			original["BTCUSDT"].Base = fixedpoint.NewFromFloat(10.0)
+			original["BTCUSDT"].AverageCost = fixedpoint.NewFromFloat(50000.0)
+			original["ETHUSDT"].Base = fixedpoint.NewFromFloat(5.0)
+			original["ETHUSDT"].AverageCost = fixedpoint.NewFromFloat(3000.0)
+
+			store := ps.NewStore("test", "map-positions")
+			err := store.Save(original)
+			assert.NoError(t, err)
+
+			var loaded map[string]*types.Position
+			err = store.Load(&loaded)
+			assert.NoError(t, err)
+
+			assert.Len(t, loaded, 2)
+			assert.NotNil(t, loaded["BTCUSDT"])
+			assert.NotNil(t, loaded["ETHUSDT"])
+			assert.Equal(t, original["BTCUSDT"].Base, loaded["BTCUSDT"].Base)
+			assert.Equal(t, original["BTCUSDT"].AverageCost, loaded["BTCUSDT"].AverageCost)
+			assert.Equal(t, original["ETHUSDT"].Base, loaded["ETHUSDT"].Base)
+			assert.Equal(t, original["ETHUSDT"].AverageCost, loaded["ETHUSDT"].AverageCost)
+		})
+	}
+}

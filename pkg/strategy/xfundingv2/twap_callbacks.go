@@ -6,12 +6,12 @@ import (
 	"github.com/c9s/bbgo/pkg/types"
 )
 
-func (w *TWAPWorker) OnNotify(cb func(trade types.Trade)) {
-	w.notifyCallbacks = append(w.notifyCallbacks, cb)
+func (w *TWAPWorker) OnTrade(cb func(trade types.Trade)) {
+	w.tradeCallbacks = append(w.tradeCallbacks, cb)
 }
 
-func (w *TWAPWorker) EmitNotify(trade types.Trade) {
-	for _, cb := range w.notifyCallbacks {
+func (w *TWAPWorker) EmitTrade(trade types.Trade) {
+	for _, cb := range w.tradeCallbacks {
 		cb(trade)
 	}
 }
