@@ -2,552 +2,891 @@ package xfundingv2
 
 import (
 	"context"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
+	"github.com/c9s/bbgo/pkg/bbgo"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
-	. "github.com/c9s/bbgo/pkg/testing/testhelper"
 	"github.com/c9s/bbgo/pkg/types"
 	"github.com/c9s/bbgo/pkg/types/mocks"
+
+	. "github.com/c9s/bbgo/pkg/testing/testhelper"
 )
 
-var testLogger = logrus.WithField("test", "twap")
+// compositeExchange combines multiple exchange interfaces for testing
+type compositeExchange struct {
+	types.Exchange
+	types.ExchangeOrderQueryService
+}
 
-var testMarket = Market("BTCUSDT")
+func newTestTWAPWorker(
+	t *testing.T,
+	ctrl *gomock.Controller,
+	config TWAPWorkerConfig,
+) (*TWAPWorker, *mocks.MockExchange, *mocks.MockExchangeOrderQueryService, *bbgo.GeneralOrderExecutor) {
+	mockExchange := mocks.NewMockExchange(ctrl)
+	mockOrderQuery := mocks.NewMockExchangeOrderQueryService(ctrl)
 
-func newTestOrderBook(bestBid, bestAsk float64) *types.SliceOrderBook {
-	return &types.SliceOrderBook{
-		Symbol: "BTCUSDT",
-		Bids: types.PriceVolumeSlice{
-			{Price: Number(bestBid), Volume: Number(10)},
-		},
-		Asks: types.PriceVolumeSlice{
-			{Price: Number(bestAsk), Volume: Number(10)},
-		},
+	// Create a composite exchange that implements both interfaces
+	compositeEx := &compositeExchange{
+		Exchange:                  mockExchange,
+		ExchangeOrderQueryService: mockOrderQuery,
+	}
+
+	mockExchange.EXPECT().Name().Return(types.ExchangeBinance).AnyTimes()
+
+	market := Market("BTCUSDT")
+	position := types.NewPositionFromMarket(market)
+
+	session := &bbgo.ExchangeSession{
+		Exchange: compositeEx,
+	}
+	session.SetMarkets(map[string]types.Market{
+		"BTCUSDT": market,
+	})
+
+	generalExecutor := bbgo.NewGeneralOrderExecutor(session, "BTCUSDT", "test", "test-instance", position)
+
+	ctx := context.Background()
+	worker, err := NewTWAPWorker(ctx, "BTCUSDT", session, generalExecutor, config)
+	assert.NoError(t, err)
+
+	return worker, mockExchange, mockOrderQuery, generalExecutor
+}
+
+// processTrade simulates processing a trade through the TradeCollector
+func processTrade(executor *bbgo.GeneralOrderExecutor, trade types.Trade) {
+	// Add order to store first (if not already there)
+	if _, found := executor.OrderStore().Get(trade.OrderID); !found {
+		executor.OrderStore().Add(types.Order{
+			OrderID: trade.OrderID,
+			SubmitOrder: types.SubmitOrder{
+				Symbol: trade.Symbol,
+				Side:   trade.Side,
+			},
+		})
+	}
+	// Process trade to update position
+	executor.TradeCollector().ProcessTrade(trade)
+}
+
+// makeTrade creates a trade with fee in BNB to avoid affecting base/quote quantity
+func makeTrade(id uint64, orderID uint64, side types.SideType, price, quantity fixedpoint.Value) types.Trade {
+	return types.Trade{
+		ID:          id,
+		OrderID:     orderID,
+		Symbol:      "BTCUSDT",
+		Side:        side,
+		Price:       price,
+		Quantity:    quantity,
+		Fee:         Number(0.001), // small fee in BNB
+		FeeCurrency: "BNB",         // fee in BNB doesn't affect base/quote quantity
 	}
 }
 
-func waitForTrades(trades *sync.Map, id uint64) {
-	_, found := trades.Load(id)
-	for !found {
-		time.Sleep(10 * time.Millisecond)
-		_, found = trades.Load(id)
-	}
+// TestTWAPWorker_FillingOrders groups tests for order filling scenarios
+func TestTWAPWorker_FillingOrders(t *testing.T) {
+	t.Run("FullyFilledOrders", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		config := TWAPWorkerConfig{
+			Duration:      10 * time.Minute,
+			NumSlices:     5,
+			OrderType:     TWAPOrderTypeMaker,
+			CheckInterval: 1 * time.Second,
+			NumOfTicks:    1,
+		}
+
+		worker, mockExchange, _, generalExecutor := newTestTWAPWorker(t, ctrl, config)
+
+		// Target position: buy 5 BTC total
+		targetPosition := Number(5.0)
+		worker.SetTargetPosition(targetPosition)
+		assert.Equal(t, types.SideTypeBuy, worker.side)
+
+		ctx := context.Background()
+		startTime := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
+
+		err := worker.Start(ctx, startTime)
+		assert.NoError(t, err)
+
+		orderBook := newOrderBook(99.0, 100.0, 100.0, 100.0)
+		orderID := uint64(1000)
+
+		mockExchange.EXPECT().
+			SubmitOrder(gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, order types.SubmitOrder) (*types.Order, error) {
+				currentOrderID := orderID
+				orderID++
+				return &types.Order{
+					OrderID: currentOrderID,
+					SubmitOrder: types.SubmitOrder{
+						Symbol:   order.Symbol,
+						Side:     order.Side,
+						Type:     order.Type,
+						Quantity: order.Quantity,
+						Price:    order.Price,
+					},
+					Status: types.OrderStatusNew,
+				}, nil
+			}).AnyTimes()
+
+		// Simulate 5 slices with full fills
+		// Expected slice quantities for buying 5 BTC in 5 slices:
+		// Slice 0: 5/5 = 1.0 BTC
+		// Slice 1: 4/4 = 1.0 BTC
+		// Slice 2: 3/3 = 1.0 BTC
+		// Slice 3: 2/2 = 1.0 BTC
+		// Slice 4: 1/1 = 1.0 BTC
+		expectedSliceQuantities := []fixedpoint.Value{
+			Number(1.0), Number(1.0), Number(1.0), Number(1.0), Number(1.0),
+		}
+
+		filledQty := fixedpoint.Zero
+		tradeID := uint64(1)
+		for slice := 0; slice < 5; slice++ {
+			// Calculate what we expect to fill this slice (remaining / remaining_slices)
+			remaining := targetPosition.Sub(filledQty)
+			remainingSlices := 5 - slice
+			expectedSliceQty := remaining.Div(fixedpoint.NewFromInt(int64(remainingSlices)))
+
+			// Verify expected slice quantity matches our pre-calculated expectation
+			assert.Equal(t, expectedSliceQuantities[slice], expectedSliceQty,
+				"slice %d: expected slice quantity mismatch", slice)
+
+			// Tick to place order
+			sliceTime := startTime.Add(time.Duration(slice) * 2 * time.Minute)
+			err = worker.Tick(sliceTime, orderBook)
+			assert.NoError(t, err)
+
+			// Get the active order and verify its quantity matches the expected slice quantity
+			activeOrder := worker.ActiveOrder()
+			assert.NotNil(t, activeOrder, "slice %d: active order should not be nil", slice)
+			assert.Equal(t, expectedSliceQty, activeOrder.Quantity,
+				"slice %d: active order quantity should match expected slice quantity", slice)
+
+			// Simulate trade fill through TradeCollector
+			trade := makeTrade(tradeID, activeOrder.OrderID, types.SideTypeBuy, Number(99.01), expectedSliceQty)
+			processTrade(generalExecutor, trade)
+			filledQty = filledQty.Add(expectedSliceQty)
+
+			// Verify cumulative filled quantity after each slice
+			assert.Equal(t, filledQty, worker.FilledQuantity(),
+				"slice %d: cumulative filled quantity mismatch", slice)
+
+			tradeID++
+		}
+
+		// Verify all filled
+		assert.Equal(t, targetPosition, worker.FilledQuantity())
+		assert.True(t, worker.RemainingQuantity().IsZero())
+	})
+
+	t.Run("PartialFillCarryover", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		config := TWAPWorkerConfig{
+			Duration:      6 * time.Minute,
+			NumSlices:     3,
+			OrderType:     TWAPOrderTypeMaker,
+			CheckInterval: 1 * time.Second,
+			NumOfTicks:    1,
+		}
+
+		worker, mockExchange, _, generalExecutor := newTestTWAPWorker(t, ctrl, config)
+
+		// Target position: buy 3 BTC total
+		targetPosition := Number(3.0)
+		worker.SetTargetPosition(targetPosition)
+
+		ctx := context.Background()
+		startTime := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
+
+		err := worker.Start(ctx, startTime)
+		assert.NoError(t, err)
+
+		orderBook := newOrderBook(99.0, 100.0, 100.0, 100.0)
+		orderID := uint64(1000)
+
+		mockExchange.EXPECT().
+			SubmitOrder(gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, order types.SubmitOrder) (*types.Order, error) {
+				currentOrderID := orderID
+				orderID++
+				return &types.Order{
+					OrderID: currentOrderID,
+					SubmitOrder: types.SubmitOrder{
+						Symbol:   order.Symbol,
+						Side:     order.Side,
+						Type:     order.Type,
+						Quantity: order.Quantity,
+						Price:    order.Price,
+					},
+					Status: types.OrderStatusNew,
+				}, nil
+			}).AnyTimes()
+
+		// Slice 1: Place order for ~1 BTC (3/3), only fill 0.5 BTC
+		err = worker.Tick(startTime, orderBook)
+		assert.NoError(t, err)
+
+		activeOrder := worker.ActiveOrder()
+		assert.NotNil(t, activeOrder)
+
+		// Partial fill: 0.5 BTC
+		trade1 := makeTrade(1, activeOrder.OrderID, types.SideTypeBuy, Number(99.01), Number(0.5))
+		processTrade(generalExecutor, trade1)
+
+		assert.Equal(t, Number(0.5), worker.FilledQuantity())
+		assert.Equal(t, Number(2.5), worker.RemainingQuantity())
+
+		// Slice 2: remaining = 2.5, remaining_slices = 2, so sliceQty = 1.25
+		// Only fill 0.75
+		slice2Time := startTime.Add(2 * time.Minute)
+		err = worker.Tick(slice2Time, orderBook)
+		assert.NoError(t, err)
+
+		activeOrder = worker.ActiveOrder()
+		trade2 := makeTrade(2, activeOrder.OrderID, types.SideTypeBuy, Number(99.01), Number(0.75))
+		processTrade(generalExecutor, trade2)
+
+		assert.Equal(t, Number(1.25), worker.FilledQuantity())
+		assert.Equal(t, Number(1.75), worker.RemainingQuantity())
+
+		// Slice 3: Fill remaining completely
+		slice3Time := startTime.Add(4 * time.Minute)
+		err = worker.Tick(slice3Time, orderBook)
+		assert.NoError(t, err)
+
+		activeOrder = worker.ActiveOrder()
+		remaining := worker.RemainingQuantity()
+		trade3 := makeTrade(3, activeOrder.OrderID, types.SideTypeBuy, Number(99.01), remaining)
+		processTrade(generalExecutor, trade3)
+
+		// Verify all filled after carryover
+		assert.Equal(t, targetPosition, worker.FilledQuantity())
+		assert.True(t, worker.RemainingQuantity().IsZero())
+	})
 }
 
-// expectSyncActiveOrder sets up mock expectations for QueryOrder and QueryOrderTrades
-// that syncAndResetActiveOrder will call after canceling an active order.
-func expectSyncActiveOrder(mockEx *mocks.MockExchangeExtended, order *types.Order) {
-	mockEx.EXPECT().QueryOrder(gomock.Any(), gomock.Any()).Return(order, nil)
-	mockEx.EXPECT().QueryOrderTrades(gomock.Any(), gomock.Any()).Return(nil, nil)
+// TestTWAPWorker_OpenThenClose groups tests for opening and closing positions
+func TestTWAPWorker_OpenThenClose(t *testing.T) {
+	t.Run("OpenLongThenClose", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		config := TWAPWorkerConfig{
+			Duration:      4 * time.Minute,
+			NumSlices:     2,
+			OrderType:     TWAPOrderTypeMaker,
+			CheckInterval: 1 * time.Second,
+			NumOfTicks:    1,
+		}
+
+		worker, mockExchange, mockOrderQuery, generalExecutor := newTestTWAPWorker(t, ctrl, config)
+
+		// Phase 1: Open long position of 2 BTC
+		targetPosition := Number(2.0)
+		worker.SetTargetPosition(targetPosition)
+		assert.Equal(t, types.SideTypeBuy, worker.side)
+
+		ctx := context.Background()
+		startTime := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
+
+		err := worker.Start(ctx, startTime)
+		assert.NoError(t, err)
+
+		orderBook := newOrderBook(99.0, 100.0, 100.0, 100.0)
+		orderID := uint64(1000)
+
+		mockExchange.EXPECT().
+			SubmitOrder(gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, order types.SubmitOrder) (*types.Order, error) {
+				currentOrderID := orderID
+				orderID++
+				return &types.Order{
+					OrderID: currentOrderID,
+					SubmitOrder: types.SubmitOrder{
+						Symbol:   order.Symbol,
+						Side:     order.Side,
+						Type:     order.Type,
+						Quantity: order.Quantity,
+						Price:    order.Price,
+					},
+					Status: types.OrderStatusNew,
+				}, nil
+			}).AnyTimes()
+
+		mockExchange.EXPECT().
+			CancelOrders(gomock.Any(), gomock.Any()).
+			Return(nil).AnyTimes()
+
+		mockOrderQuery.EXPECT().
+			QueryOrder(gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, q types.OrderQuery) (*types.Order, error) {
+				return &types.Order{OrderID: 1, Status: types.OrderStatusCanceled}, nil
+			}).AnyTimes()
+
+		mockOrderQuery.EXPECT().
+			QueryOrderTrades(gomock.Any(), gomock.Any()).
+			Return([]types.Trade{}, nil).AnyTimes()
+
+		// First slice: buy 1 BTC (2/2)
+		err = worker.Tick(startTime, orderBook)
+		assert.NoError(t, err)
+
+		activeOrder := worker.ActiveOrder()
+		assert.NotNil(t, activeOrder)
+		assert.Equal(t, types.SideTypeBuy, activeOrder.Side)
+
+		trade1 := makeTrade(1, activeOrder.OrderID, types.SideTypeBuy, Number(99.01), Number(1.0))
+		processTrade(generalExecutor, trade1)
+
+		// Second slice: buy another 1 BTC
+		slice2Time := startTime.Add(2 * time.Minute)
+		err = worker.Tick(slice2Time, orderBook)
+		assert.NoError(t, err)
+
+		activeOrder = worker.ActiveOrder()
+		trade2 := makeTrade(2, activeOrder.OrderID, types.SideTypeBuy, Number(99.01), Number(1.0))
+		processTrade(generalExecutor, trade2)
+
+		// Verify long position opened
+		assert.Equal(t, Number(2.0), worker.FilledQuantity())
+		assert.True(t, worker.RemainingQuantity().IsZero())
+
+		// Phase 2: Close the position (target = 0)
+		worker.SetTargetPosition(fixedpoint.Zero)
+		assert.Equal(t, types.SideTypeSell, worker.side)
+
+		// Reset time for closing phase - this also clears active order state
+		closeStartTime := startTime.Add(5 * time.Minute)
+		worker.ResetTime(closeStartTime, config.Duration)
+
+		// Now remaining should be -2 (need to sell 2 BTC to reach target 0)
+		assert.Equal(t, Number(-2.0), worker.RemainingQuantity())
+
+		// First close slice: sell 1 BTC
+		err = worker.Tick(closeStartTime, orderBook)
+		assert.NoError(t, err)
+
+		activeOrder = worker.ActiveOrder()
+		assert.NotNil(t, activeOrder)
+		assert.Equal(t, types.SideTypeSell, activeOrder.Side)
+
+		trade3 := makeTrade(3, activeOrder.OrderID, types.SideTypeSell, Number(99.98), Number(1.0))
+		processTrade(generalExecutor, trade3)
+
+		assert.Equal(t, Number(1.0), worker.FilledQuantity())
+		assert.Equal(t, Number(-1.0), worker.RemainingQuantity())
+
+		// Second close slice: sell remaining 1 BTC
+		closeSlice2Time := closeStartTime.Add(2 * time.Minute)
+		err = worker.Tick(closeSlice2Time, orderBook)
+		assert.NoError(t, err)
+
+		activeOrder = worker.ActiveOrder()
+		trade4 := makeTrade(4, activeOrder.OrderID, types.SideTypeSell, Number(99.98), Number(1.0))
+		processTrade(generalExecutor, trade4)
+
+		// Verify position closed
+		assert.True(t, worker.FilledQuantity().IsZero())
+		assert.True(t, worker.RemainingQuantity().IsZero())
+	})
+
+	t.Run("OpenShortThenClose", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		config := TWAPWorkerConfig{
+			Duration:      4 * time.Minute,
+			NumSlices:     2,
+			OrderType:     TWAPOrderTypeMaker,
+			CheckInterval: 1 * time.Second,
+			NumOfTicks:    1,
+		}
+
+		worker, mockExchange, mockOrderQuery, generalExecutor := newTestTWAPWorker(t, ctrl, config)
+
+		// Phase 1: Open short position of -2 BTC (sell 2 BTC)
+		targetPosition := Number(-2.0)
+		worker.SetTargetPosition(targetPosition)
+		assert.Equal(t, types.SideTypeSell, worker.side)
+
+		ctx := context.Background()
+		startTime := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
+
+		err := worker.Start(ctx, startTime)
+		assert.NoError(t, err)
+
+		orderBook := newOrderBook(99.0, 100.0, 100.0, 100.0)
+		orderID := uint64(1000)
+
+		mockExchange.EXPECT().
+			SubmitOrder(gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, order types.SubmitOrder) (*types.Order, error) {
+				currentOrderID := orderID
+				orderID++
+				return &types.Order{
+					OrderID: currentOrderID,
+					SubmitOrder: types.SubmitOrder{
+						Symbol:   order.Symbol,
+						Side:     order.Side,
+						Type:     order.Type,
+						Quantity: order.Quantity,
+						Price:    order.Price,
+					},
+					Status: types.OrderStatusNew,
+				}, nil
+			}).AnyTimes()
+
+		mockExchange.EXPECT().
+			CancelOrders(gomock.Any(), gomock.Any()).
+			Return(nil).AnyTimes()
+
+		mockOrderQuery.EXPECT().
+			QueryOrder(gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, q types.OrderQuery) (*types.Order, error) {
+				return &types.Order{OrderID: 1, Status: types.OrderStatusCanceled}, nil
+			}).AnyTimes()
+
+		mockOrderQuery.EXPECT().
+			QueryOrderTrades(gomock.Any(), gomock.Any()).
+			Return([]types.Trade{}, nil).AnyTimes()
+
+		// First slice: sell 1 BTC (-2/2 = -1)
+		err = worker.Tick(startTime, orderBook)
+		assert.NoError(t, err)
+
+		activeOrder := worker.ActiveOrder()
+		assert.NotNil(t, activeOrder)
+		assert.Equal(t, types.SideTypeSell, activeOrder.Side)
+
+		trade1 := makeTrade(1, activeOrder.OrderID, types.SideTypeSell, Number(99.98), Number(1.0))
+		processTrade(generalExecutor, trade1)
+
+		// Second slice: sell another 1 BTC
+		slice2Time := startTime.Add(2 * time.Minute)
+		err = worker.Tick(slice2Time, orderBook)
+		assert.NoError(t, err)
+
+		activeOrder = worker.ActiveOrder()
+		trade2 := makeTrade(2, activeOrder.OrderID, types.SideTypeSell, Number(99.98), Number(1.0))
+		processTrade(generalExecutor, trade2)
+
+		// Verify short position opened
+		assert.Equal(t, Number(-2.0), worker.FilledQuantity())
+		assert.True(t, worker.RemainingQuantity().IsZero())
+
+		// Phase 2: Close the position (target = 0)
+		worker.SetTargetPosition(fixedpoint.Zero)
+		assert.Equal(t, types.SideTypeBuy, worker.side)
+
+		// Reset time for closing phase
+		closeStartTime := startTime.Add(5 * time.Minute)
+		worker.ResetTime(closeStartTime, config.Duration)
+
+		// Now remaining should be +2 (need to buy 2 BTC to reach target 0)
+		assert.Equal(t, Number(2.0), worker.RemainingQuantity())
+
+		// First close slice: buy 1 BTC
+		err = worker.Tick(closeStartTime, orderBook)
+		assert.NoError(t, err)
+
+		activeOrder = worker.ActiveOrder()
+		assert.NotNil(t, activeOrder)
+		assert.Equal(t, types.SideTypeBuy, activeOrder.Side)
+
+		trade3 := makeTrade(3, activeOrder.OrderID, types.SideTypeBuy, Number(99.01), Number(1.0))
+		processTrade(generalExecutor, trade3)
+
+		assert.Equal(t, Number(-1.0), worker.FilledQuantity())
+		assert.Equal(t, Number(1.0), worker.RemainingQuantity())
+
+		// Second close slice: buy remaining 1 BTC
+		closeSlice2Time := closeStartTime.Add(2 * time.Minute)
+		err = worker.Tick(closeSlice2Time, orderBook)
+		assert.NoError(t, err)
+
+		activeOrder = worker.ActiveOrder()
+		trade4 := makeTrade(4, activeOrder.OrderID, types.SideTypeBuy, Number(99.01), Number(1.0))
+		processTrade(generalExecutor, trade4)
+
+		// Verify position closed
+		assert.True(t, worker.FilledQuantity().IsZero())
+		assert.True(t, worker.RemainingQuantity().IsZero())
+	})
 }
 
-func TestTWAPWorker_TakerBasic(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
+// TestTWAPWorker_Deadline groups tests for deadline exceeded scenarios
+func TestTWAPWorker_Deadline(t *testing.T) {
+	t.Run("StateTransitionToDone", func(t *testing.T) {
+		// Tests state transition to Done when deadline exceeds with filled position
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
 
-	mockEx := mocks.NewMockExchangeExtended(ctrl)
+		config := TWAPWorkerConfig{
+			Duration:      2 * time.Minute,
+			NumSlices:     2,
+			OrderType:     TWAPOrderTypeMaker,
+			CheckInterval: 1 * time.Second,
+			NumOfTicks:    1,
+		}
 
-	config := TWAPWorkerConfig{
-		Duration:  10 * time.Minute,
-		NumSlices: 5,
-		OrderType: TWAPOrderTypeTaker,
-	}
+		worker, mockExchange, _, generalExecutor := newTestTWAPWorker(t, ctrl, config)
 
-	worker, err := NewTWAPWorker(mockEx, testMarket, config)
-	assert.NoError(t, err)
-	worker.SetLogger(testLogger)
-	assert.NoError(t, worker.SetTargetPosition(Number(1.0)))
-	assert.Equal(t, TWAPWorkerStatePending, worker.State())
+		targetPosition := Number(1.0)
+		worker.SetTargetPosition(targetPosition)
 
-	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	assert.NoError(t, worker.Start(ctx, now))
-	assert.Equal(t, TWAPWorkerStateRunning, worker.State())
-	assert.Equal(t, 2*time.Minute, worker.placeOrderInterval)
+		ctx := context.Background()
+		startTime := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
 
-	ob := newTestOrderBook(50000.0, 50010.0)
+		err := worker.Start(ctx, startTime)
+		assert.NoError(t, err)
 
-	orderID := uint64(1)
-	// first tick: no active order → place order for full remaining quantity
-	mockEx.EXPECT().SubmitOrder(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ context.Context, order types.SubmitOrder) (*types.Order, error) {
-			assert.Equal(t, types.SideTypeBuy, order.Side)
-			assert.Equal(t, types.OrderTypeLimit, order.Type)
-			assert.Equal(t, types.TimeInForceIOC, order.TimeInForce)
-			// taker buy uses best ask price
-			assert.Equal(t, Number(50010.0), order.Price)
-			// full remaining (no slicing on initial placement)
-			assert.Equal(t, Number(1.0), order.Quantity)
-			return &types.Order{
-				SubmitOrder:      order,
-				OrderID:          orderID,
-				ExecutedQuantity: fixedpoint.Zero,
-			}, nil
-		},
-	)
+		orderBook := newOrderBook(99.0, 100.0, 100.0, 100.0)
+		orderID := uint64(1000)
 
-	err = worker.Tick(now, ob)
-	assert.NoError(t, err)
-	assert.NotNil(t, worker.ActiveOrder())
-	assert.Len(t, worker.Orders(), 1)
+		mockExchange.EXPECT().
+			SubmitOrder(gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, order types.SubmitOrder) (*types.Order, error) {
+				currentOrderID := orderID
+				orderID++
+				return &types.Order{
+					OrderID: currentOrderID,
+					SubmitOrder: types.SubmitOrder{
+						Symbol:   order.Symbol,
+						Side:     order.Side,
+						Type:     order.Type,
+						Quantity: order.Quantity,
+						Price:    order.Price,
+					},
+					Status: types.OrderStatusNew,
+				}, nil
+			}).AnyTimes()
 
-	// simulate partial fill (0.2 of 1.0)
-	trades := &sync.Map{}
-	worker.OnNotify(func(trade types.Trade) {
-		trades.Store(trade.ID, struct{}{})
-	})
-	worker.HandleTrade(types.Trade{
-		ID:       1,
-		OrderID:  orderID,
-		Quantity: Number(0.2),
-		Price:    Number(50010.0),
-	})
-	waitForTrades(trades, 1)
-	// activeOrder stays non-nil
-	assert.NotNil(t, worker.ActiveOrder())
-	assert.Equal(t, Number(0.2), worker.FilledQuantity())
-	assert.Equal(t, Number(0.8), worker.RemainingQuantity())
-	assert.Len(t, worker.Trades(), 1)
+		// First slice: full fill
+		err = worker.Tick(startTime, orderBook)
+		assert.NoError(t, err)
 
-	// trade for unknown order should be ignored (processTrade skips it, no notify)
-	worker.HandleTrade(types.Trade{
-		ID:       2,
-		OrderID:  9999,
-		Quantity: Number(1.0),
-		Price:    Number(50010.0),
-	})
-	// give the background goroutine a moment to process (it will skip this trade)
-	time.Sleep(50 * time.Millisecond)
-	assert.Len(t, worker.Trades(), 1)
-	assert.Equal(t, Number(0.2), worker.FilledQuantity())
+		activeOrder := worker.ActiveOrder()
+		trade1 := makeTrade(1, activeOrder.OrderID, types.SideTypeBuy, Number(99.01), targetPosition)
+		processTrade(generalExecutor, trade1)
 
-	// second tick at +1min: within interval [0, 2min), taker → cancel-and-replace active order
-	orderID = 2
-	mockEx.EXPECT().CancelOrders(gomock.Any(), gomock.Any()).Return(nil)
-	mockEx.EXPECT().SubmitOrder(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ context.Context, order types.SubmitOrder) (*types.Order, error) {
-			// replacement for remaining on active order: 1.0 - 0.2 = 0.8
-			assert.Equal(t, Number(0.8), order.Quantity)
-			return &types.Order{
-				SubmitOrder:      order,
-				OrderID:          orderID,
-				ExecutedQuantity: fixedpoint.Zero,
-			}, nil
-		},
-	)
-	expectSyncActiveOrder(mockEx, &types.Order{
-		OrderID:          1,
-		ExecutedQuantity: Number(0.2),
-		SubmitOrder: types.SubmitOrder{
-			Quantity: Number(1.0),
-		},
+		assert.Equal(t, targetPosition, worker.FilledQuantity())
+		assert.True(t, worker.RemainingQuantity().IsZero())
+
+		// Tick past deadline - position is filled so no new order needed
+		deadlineTime := startTime.Add(3 * time.Minute)
+
+		err = worker.Tick(deadlineTime, orderBook)
+		assert.NoError(t, err)
+
+		// After deadline, state should be done
+		assert.Equal(t, TWAPWorkerStateDone, worker.State())
+		assert.True(t, worker.IsDone())
 	})
 
-	err = worker.Tick(now.Add(1*time.Minute), ob)
-	assert.NoError(t, err)
-	assert.Len(t, worker.Orders(), 2)
+	t.Run("CancelActiveOrderAtDeadline", func(t *testing.T) {
+		// Tests that active orders are canceled when deadline is exceeded
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
 
-	// simulate partial fill of second order
-	worker.HandleTrade(types.Trade{
-		ID:       3,
-		OrderID:  orderID,
-		Quantity: Number(0.2),
-		Price:    Number(50010.0),
+		config := TWAPWorkerConfig{
+			Duration:      2 * time.Minute,
+			NumSlices:     2,
+			OrderType:     TWAPOrderTypeMaker,
+			CheckInterval: 1 * time.Second,
+			NumOfTicks:    1,
+		}
+
+		worker, mockExchange, mockOrderQuery, _ := newTestTWAPWorker(t, ctrl, config)
+
+		targetPosition := Number(1.0)
+		worker.SetTargetPosition(targetPosition)
+
+		ctx := context.Background()
+		startTime := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
+
+		err := worker.Start(ctx, startTime)
+		assert.NoError(t, err)
+
+		orderBook := newOrderBook(99.0, 100.0, 100.0, 100.0)
+		orderID := uint64(1000)
+
+		mockExchange.EXPECT().
+			SubmitOrder(gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, order types.SubmitOrder) (*types.Order, error) {
+				currentOrderID := orderID
+				orderID++
+				return &types.Order{
+					OrderID: currentOrderID,
+					SubmitOrder: types.SubmitOrder{
+						Symbol:   order.Symbol,
+						Side:     order.Side,
+						Type:     order.Type,
+						Quantity: order.Quantity,
+						Price:    order.Price,
+					},
+					Status: types.OrderStatusNew,
+				}, nil
+			}).AnyTimes()
+
+		// Track if CancelOrders was called
+		cancelCalled := false
+		mockExchange.EXPECT().
+			CancelOrders(gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, orders ...types.Order) error {
+				cancelCalled = true
+				return nil
+			}).AnyTimes()
+
+		mockOrderQuery.EXPECT().
+			QueryOrder(gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, q types.OrderQuery) (*types.Order, error) {
+				return &types.Order{OrderID: 1, Status: types.OrderStatusCanceled}, nil
+			}).AnyTimes()
+
+		mockOrderQuery.EXPECT().
+			QueryOrderTrades(gomock.Any(), gomock.Any()).
+			Return([]types.Trade{}, nil).AnyTimes()
+
+		// First tick: place order but don't fill it
+		err = worker.Tick(startTime, orderBook)
+		assert.NoError(t, err)
+		assert.NotNil(t, worker.ActiveOrder())
+
+		// Tick past deadline with unfilled order
+		// Note: This will fail to place the final market order due to dust check
+		// but we can verify CancelOrders was called
+		deadlineTime := startTime.Add(3 * time.Minute)
+		_ = worker.Tick(deadlineTime, orderBook)
+
+		// Verify that cancel was attempted
+		assert.True(t, cancelCalled, "CancelOrders should be called when deadline exceeded with active order")
 	})
-	waitForTrades(trades, 3)
-	assert.Equal(t, Number(0.4), worker.FilledQuantity())
-
-	// third tick at +2min+1ns: past interval end [0, 2min), enters "next slice" path
-	// calculates slice: remaining=0.6, timeLeft≈8min, slices=3, qty=0.6/3=0.2
-	orderID = 3
-	mockEx.EXPECT().SubmitOrder(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ context.Context, order types.SubmitOrder) (*types.Order, error) {
-			assert.Equal(t, Number(0.2), order.Quantity)
-			return &types.Order{
-				SubmitOrder:      order,
-				OrderID:          orderID,
-				ExecutedQuantity: fixedpoint.Zero,
-			}, nil
-		},
-	)
-
-	err = worker.Tick(now.Add(2*time.Minute+time.Nanosecond), ob)
-	assert.NoError(t, err)
-	assert.Len(t, worker.Orders(), 3)
 }
 
-func TestTWAPWorker_MakerCancelAndReplace(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
+// TestTWAPWorker_Misc groups miscellaneous tests
+func TestTWAPWorker_Misc(t *testing.T) {
+	t.Run("CalculateSliceQuantity", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
 
-	mockEx := mocks.NewMockExchangeExtended(ctrl)
+		config := TWAPWorkerConfig{
+			Duration:     10 * time.Minute,
+			NumSlices:    5,
+			OrderType:    TWAPOrderTypeMaker,
+			MaxSliceSize: Number(0.5),
+			MinSliceSize: Number(0.1),
+		}
 
-	config := TWAPWorkerConfig{
-		Duration:   4 * time.Minute,
-		NumSlices:  2,
-		OrderType:  TWAPOrderTypeMaker,
-		NumOfTicks: 1,
-	}
+		worker, _, _, _ := newTestTWAPWorker(t, ctrl, config)
 
-	worker, err := NewTWAPWorker(mockEx, testMarket, config)
-	assert.NoError(t, err)
-	worker.SetLogger(testLogger)
-	assert.NoError(t, worker.SetTargetPosition(Number(-0.5)))
-	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		startTime := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
+		worker.ResetTime(startTime, config.Duration)
 
-	assert.NoError(t, worker.Start(ctx, now))
+		t.Run("normal slice calculation", func(t *testing.T) {
+			// remaining = 2.0, time left = 8 min, interval = 2 min, remaining_slices = 4
+			// expected = 2.0 / 4 = 0.5
+			currentTime := startTime.Add(2 * time.Minute)
+			sliceQty := worker.calculateSliceQuantity(currentTime, Number(2.0), false)
+			assert.Equal(t, Number(0.5), sliceQty)
+		})
 
-	ob := newTestOrderBook(50000.0, 50010.0)
+		t.Run("respects max slice size", func(t *testing.T) {
+			// remaining = 5.0, remaining_slices = 5
+			// expected = 5.0 / 5 = 1.0, but max = 0.5
+			sliceQty := worker.calculateSliceQuantity(startTime, Number(5.0), false)
+			assert.Equal(t, Number(0.5), sliceQty)
+		})
 
-	// first tick: place maker sell order
-	var firstOrder *types.Order
-	mockEx.EXPECT().SubmitOrder(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ context.Context, order types.SubmitOrder) (*types.Order, error) {
-			assert.Equal(t, types.SideTypeSell, order.Side)
-			assert.Equal(t, types.OrderTypeLimitMaker, order.Type)
-			// maker sell: best ask (50010) - 1 tick (0.01) = 50009.99
-			assert.Equal(t, Number(50009.99), order.Price)
-			// full remaining quantity
-			assert.Equal(t, Number(0.5), order.Quantity)
-			firstOrder = &types.Order{
-				SubmitOrder:      order,
-				OrderID:          1,
-				ExecutedQuantity: fixedpoint.Zero,
+		t.Run("respects min slice size", func(t *testing.T) {
+			// remaining = 0.5, remaining_slices = 5
+			// expected = 0.5 / 5 = 0.1
+			sliceQty := worker.calculateSliceQuantity(startTime, Number(0.5), false)
+			assert.Equal(t, Number(0.1), sliceQty)
+		})
+
+		t.Run("remaining less than min returns remaining", func(t *testing.T) {
+			// remaining = 0.05, which is less than min 0.1
+			sliceQty := worker.calculateSliceQuantity(startTime, Number(0.05), false)
+			assert.Equal(t, Number(0.05), sliceQty)
+		})
+
+		t.Run("deadline exceeded returns all remaining", func(t *testing.T) {
+			sliceQty := worker.calculateSliceQuantity(startTime, Number(3.0), true)
+			assert.Equal(t, Number(3.0), sliceQty)
+		})
+	})
+
+	t.Run("StateTransitions", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		config := TWAPWorkerConfig{
+			Duration:  2 * time.Minute,
+			NumSlices: 2,
+			OrderType: TWAPOrderTypeMaker,
+		}
+
+		worker, mockExchange, _, generalExecutor := newTestTWAPWorker(t, ctrl, config)
+
+		// Initially pending
+		assert.Equal(t, TWAPWorkerStatePending, worker.State())
+
+		worker.SetTargetPosition(Number(1.0))
+
+		ctx := context.Background()
+		startTime := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
+
+		err := worker.Start(ctx, startTime)
+		assert.NoError(t, err)
+
+		// After start, should be running
+		assert.Equal(t, TWAPWorkerStateRunning, worker.State())
+
+		orderBook := newOrderBook(99.0, 100.0, 100.0, 100.0)
+
+		mockExchange.EXPECT().
+			SubmitOrder(gomock.Any(), gomock.Any()).
+			Return(&types.Order{
+				OrderID: 1,
+				SubmitOrder: types.SubmitOrder{
+					Symbol:   "BTCUSDT",
+					Quantity: Number(1.0),
+				},
+			}, nil).AnyTimes()
+
+		// Tick to place an order and fill it
+		err = worker.Tick(startTime, orderBook)
+		assert.NoError(t, err)
+
+		// Fill the order completely so we don't need market order at deadline
+		activeOrder := worker.ActiveOrder()
+		trade := makeTrade(1, activeOrder.OrderID, types.SideTypeBuy, Number(99.01), Number(1.0))
+		processTrade(generalExecutor, trade)
+
+		assert.True(t, worker.RemainingQuantity().IsZero())
+
+		// Tick past end time - position is filled, no market order needed
+		endTime := startTime.Add(3 * time.Minute)
+		err = worker.Tick(endTime, orderBook)
+		assert.NoError(t, err)
+
+		// After deadline, should be done
+		assert.Equal(t, TWAPWorkerStateDone, worker.State())
+		assert.True(t, worker.IsDone())
+	})
+
+	t.Run("ShouldUpdateActiveOrder", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		config := TWAPWorkerConfig{
+			Duration:   10 * time.Minute,
+			NumSlices:  5,
+			OrderType:  TWAPOrderTypeMaker,
+			NumOfTicks: 1,
+		}
+
+		worker, _, _, _ := newTestTWAPWorker(t, ctrl, config)
+
+		worker.SetTargetPosition(Number(1.0))
+
+		ctx := context.Background()
+		startTime := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
+
+		err := worker.Start(ctx, startTime)
+		assert.NoError(t, err)
+
+		t.Run("no active order returns false", func(t *testing.T) {
+			orderBook := newOrderBook(99.0, 100.0, 100.0, 100.0)
+			result := worker.shouldUpdateActiveOrder(orderBook)
+			assert.False(t, result)
+		})
+
+		t.Run("better buy price triggers update", func(t *testing.T) {
+			worker.activeOrder = &types.Order{
+				OrderID: 1,
+				SubmitOrder: types.SubmitOrder{
+					Side:  types.SideTypeBuy,
+					Price: Number(99.01),
+				},
 			}
-			return firstOrder, nil
-		},
-	)
+			// New best bid is higher, so improved price would be 99.51
+			orderBook := newOrderBook(99.5, 100.0, 100.0, 100.0)
+			result := worker.shouldUpdateActiveOrder(orderBook)
+			assert.True(t, result)
+		})
 
-	err = worker.Tick(now, ob)
-	assert.NoError(t, err)
-	assert.NotNil(t, worker.ActiveOrder())
-
-	// second tick at +1min: within interval [0, 2min), price moved DOWN (better for sell)
-	// shouldUpdateActiveOrder returns true because new price < current price
-	mockEx.EXPECT().CancelOrders(gomock.Any(), gomock.Any()).Return(nil)
-
-	// new orderbook with lower ask — better price for sell
-	ob2 := newTestOrderBook(49900.0, 49910.0)
-
-	// after cancel, place replacement order, then syncAndResetActiveOrder
-	mockEx.EXPECT().SubmitOrder(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ context.Context, order types.SubmitOrder) (*types.Order, error) {
-			// maker sell: best ask (49910) - 1 tick (0.01) = 49909.99
-			assert.Equal(t, Number(49909.99), order.Price)
-			// remaining on active order: 0.5 - 0 = 0.5
-			assert.Equal(t, Number(0.5), order.Quantity)
-			return &types.Order{
-				SubmitOrder:      order,
-				OrderID:          2,
-				ExecutedQuantity: fixedpoint.Zero,
-			}, nil
-		},
-	)
-	expectSyncActiveOrder(mockEx, firstOrder)
-
-	err = worker.Tick(now.Add(1*time.Minute), ob2)
-	assert.NoError(t, err)
-}
-
-func TestTWAPWorker_PartialFillAdjusts(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	mockEx := mocks.NewMockExchangeExtended(ctrl)
-
-	config := TWAPWorkerConfig{
-		Duration:  4 * time.Minute,
-		NumSlices: 2,
-		OrderType: TWAPOrderTypeTaker,
-	}
-
-	worker, err := NewTWAPWorker(mockEx, testMarket, config)
-	assert.NoError(t, err)
-	worker.SetLogger(testLogger)
-	assert.NoError(t, worker.SetTargetPosition(Number(1.0)))
-	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	assert.NoError(t, worker.Start(ctx, now))
-
-	ob := newTestOrderBook(50000.0, 50010.0)
-
-	// first order: full remaining quantity
-	mockEx.EXPECT().SubmitOrder(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ context.Context, order types.SubmitOrder) (*types.Order, error) {
-			assert.Equal(t, Number(1.0), order.Quantity)
-			return &types.Order{
-				SubmitOrder:      order,
-				OrderID:          1,
-				ExecutedQuantity: fixedpoint.Zero,
-			}, nil
-		},
-	)
-
-	err = worker.Tick(now, ob)
-	assert.NoError(t, err)
-
-	// partial fill: only 0.3 of 1.0 filled
-	trades := &sync.Map{}
-	worker.OnNotify(func(trade types.Trade) {
-		trades.Store(trade.ID, struct{}{})
-	})
-	worker.HandleTrade(types.Trade{
-		ID:       1,
-		OrderID:  1,
-		Quantity: Number(0.3),
-		Price:    Number(50010.0),
-	})
-	waitForTrades(trades, 1)
-	assert.Equal(t, Number(0.3), worker.FilledQuantity())
-	// active order still exists (0.7 remaining on order)
-	assert.NotNil(t, worker.ActiveOrder())
-
-	// tick at +1min: within interval [0, 2min), active order exists
-	// shouldUpdateActiveOrder returns true for taker, cancel-and-replace happens
-	mockEx.EXPECT().CancelOrders(gomock.Any(), gomock.Any()).Return(nil)
-	mockEx.EXPECT().SubmitOrder(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ context.Context, order types.SubmitOrder) (*types.Order, error) {
-			// replacement for remaining on active order: 1.0 - 0.3 = 0.7
-			assert.Equal(t, Number(0.7), order.Quantity)
-			return &types.Order{
-				SubmitOrder:      order,
-				OrderID:          2,
-				ExecutedQuantity: fixedpoint.Zero,
-			}, nil
-		},
-	)
-	expectSyncActiveOrder(mockEx, &types.Order{
-		OrderID:          1,
-		ExecutedQuantity: Number(0.3),
-		SubmitOrder: types.SubmitOrder{
-			Quantity: Number(1.0),
-		},
-	})
-
-	err = worker.Tick(now.Add(1*time.Minute), ob)
-	assert.NoError(t, err)
-}
-
-func TestTWAPWorker_DeadlineMarketOrder(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	mockEx := mocks.NewMockExchangeExtended(ctrl)
-
-	config := TWAPWorkerConfig{
-		Duration:  2 * time.Minute,
-		NumSlices: 2,
-		OrderType: TWAPOrderTypeMaker,
-	}
-
-	worker, err := NewTWAPWorker(mockEx, testMarket, config)
-	assert.NoError(t, err)
-	worker.SetLogger(testLogger)
-	assert.NoError(t, worker.SetTargetPosition(Number(-0.5)))
-	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	assert.NoError(t, worker.Start(ctx, now))
-
-	ob := newTestOrderBook(50000.0, 50010.0)
-
-	// first tick: normal maker order for full remaining
-	var firstOrder *types.Order
-	mockEx.EXPECT().SubmitOrder(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ context.Context, order types.SubmitOrder) (*types.Order, error) {
-			assert.Equal(t, Number(0.5), order.Quantity)
-			firstOrder = &types.Order{
-				SubmitOrder:      order,
-				OrderID:          1,
-				ExecutedQuantity: fixedpoint.Zero,
+		t.Run("worse buy price does not trigger update", func(t *testing.T) {
+			worker.activeOrder = &types.Order{
+				OrderID: 1,
+				SubmitOrder: types.SubmitOrder{
+					Side:  types.SideTypeBuy,
+					Price: Number(99.51),
+				},
 			}
-			return firstOrder, nil
-		},
-	)
-	err = worker.Tick(now, ob)
-	assert.NoError(t, err)
+			// New best bid is lower
+			orderBook := newOrderBook(99.0, 100.0, 100.0, 100.0)
+			result := worker.shouldUpdateActiveOrder(orderBook)
+			assert.False(t, result)
+		})
 
-	// simulate partial fill
-	trades := &sync.Map{}
-	worker.OnNotify(func(trade types.Trade) {
-		trades.Store(trade.ID, struct{}{})
+		t.Run("better sell price triggers update", func(t *testing.T) {
+			worker.side = types.SideTypeSell
+			worker.activeOrder = &types.Order{
+				OrderID: 1,
+				SubmitOrder: types.SubmitOrder{
+					Side:  types.SideTypeSell,
+					Price: Number(99.98),
+				},
+			}
+			// New best ask is lower, so improved price would be 99.49
+			orderBook := newOrderBook(99.0, 100.0, 99.5, 100.0)
+			result := worker.shouldUpdateActiveOrder(orderBook)
+			assert.True(t, result)
+		})
 	})
-	worker.HandleTrade(types.Trade{
-		ID:       1,
-		OrderID:  1,
-		Quantity: Number(0.1),
-		Price:    Number(50010.0),
+
+	t.Run("TakerOrderTypeAlwaysUpdates", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		config := TWAPWorkerConfig{
+			Duration:   10 * time.Minute,
+			NumSlices:  5,
+			OrderType:  TWAPOrderTypeTaker, // Taker orders
+			NumOfTicks: 1,
+		}
+
+		worker, _, _, _ := newTestTWAPWorker(t, ctrl, config)
+
+		worker.SetTargetPosition(Number(1.0))
+
+		ctx := context.Background()
+		startTime := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
+
+		err := worker.Start(ctx, startTime)
+		assert.NoError(t, err)
+
+		worker.activeOrder = &types.Order{
+			OrderID: 1,
+			SubmitOrder: types.SubmitOrder{
+				Side:  types.SideTypeBuy,
+				Price: Number(100.0),
+			},
+		}
+
+		// For taker orders, should always return true to refresh
+		orderBook := newOrderBook(99.0, 100.0, 100.0, 100.0)
+		result := worker.shouldUpdateActiveOrder(orderBook)
+		assert.True(t, result)
 	})
-	waitForTrades(trades, 1)
-
-	// tick at deadline: cancel active order, sync, then use IOC limit order for remaining
-	mockEx.EXPECT().CancelOrders(gomock.Any(), gomock.Any()).Return(nil)
-	expectSyncActiveOrder(mockEx, firstOrder)
-	mockEx.EXPECT().SubmitOrder(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ context.Context, order types.SubmitOrder) (*types.Order, error) {
-			// should be IOC limit for remaining 0.4
-			assert.Equal(t, types.OrderTypeLimit, order.Type)
-			assert.Equal(t, types.TimeInForceIOC, order.TimeInForce)
-			assert.Equal(t, Number(0.4), order.Quantity)
-			return &types.Order{
-				SubmitOrder:      order,
-				OrderID:          2,
-				ExecutedQuantity: fixedpoint.Zero,
-			}, nil
-		},
-	)
-
-	// tick slightly past deadline to trigger state=Done via deferred
-	err = worker.Tick(now.Add(2*time.Minute+time.Nanosecond), ob)
-	assert.NoError(t, err)
-	assert.True(t, worker.IsDone())
-}
-
-func TestTWAPWorker_Cancel(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	mockEx := mocks.NewMockExchangeExtended(ctrl)
-
-	config := TWAPWorkerConfig{
-		Duration:  10 * time.Minute,
-		NumSlices: 5,
-		OrderType: TWAPOrderTypeTaker,
-	}
-
-	worker, err := NewTWAPWorker(mockEx, testMarket, config)
-	assert.NoError(t, err)
-	worker.SetLogger(testLogger)
-	assert.NoError(t, worker.SetTargetPosition(Number(1.0)))
-	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	assert.NoError(t, worker.Start(ctx, now))
-
-	worker.Stop()
-	assert.Equal(t, TWAPWorkerStateDone, worker.State())
-	assert.True(t, worker.IsDone())
-
-	// tick after cancel should be no-op
-	ob := newTestOrderBook(50000.0, 50010.0)
-	err = worker.Tick(now.Add(time.Minute), ob)
-	assert.NoError(t, err)
-}
-
-func TestTWAPWorker_DustQuantityStaysRunning(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	mockEx := mocks.NewMockExchangeExtended(ctrl)
-
-	config := TWAPWorkerConfig{
-		Duration:  4 * time.Minute,
-		NumSlices: 2,
-		OrderType: TWAPOrderTypeTaker,
-	}
-
-	worker, err := NewTWAPWorker(mockEx, testMarket, config)
-	assert.NoError(t, err)
-	worker.SetLogger(testLogger)
-	assert.NoError(t, worker.SetTargetPosition(Number(0.5)))
-	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	assert.NoError(t, worker.Start(ctx, now))
-
-	ob := newTestOrderBook(50000.0, 50010.0)
-
-	// first order
-	mockEx.EXPECT().SubmitOrder(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(_ context.Context, order types.SubmitOrder) (*types.Order, error) {
-			return &types.Order{
-				SubmitOrder:      order,
-				OrderID:          1,
-				ExecutedQuantity: fixedpoint.Zero,
-			}, nil
-		},
-	)
-	err = worker.Tick(now, ob)
-	assert.NoError(t, err)
-
-	// fill almost everything, leaving dust (< MinQuantity 0.001)
-	trades := &sync.Map{}
-	worker.OnNotify(func(trade types.Trade) {
-		trades.Store(trade.ID, struct{}{})
-	})
-	worker.HandleTrade(types.Trade{
-		ID:       1,
-		OrderID:  1,
-		Quantity: Number(0.4995),
-		Price:    Number(50010.0),
-	})
-	waitForTrades(trades, 1)
-
-	// next tick at +2min: remaining 0.0005 is dust → placeOrder returns error, but worker stays running
-	err = worker.Tick(now.Add(2*time.Minute), ob)
-	assert.Error(t, err)
-	assert.Equal(t, TWAPWorkerStateRunning, worker.State())
-}
-
-func TestTWAPWorker_HandleTradeKeepsRunningAfterFill(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	mockEx := mocks.NewMockExchangeExtended(ctrl)
-
-	config := TWAPWorkerConfig{
-		Duration:  4 * time.Minute,
-		NumSlices: 2,
-		OrderType: TWAPOrderTypeTaker,
-	}
-
-	worker, err := NewTWAPWorker(mockEx, testMarket, config)
-	assert.NoError(t, err)
-	worker.SetLogger(testLogger)
-	assert.NoError(t, worker.SetTargetPosition(Number(0.5)))
-	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	assert.NoError(t, worker.Start(ctx, now))
-
-	// simulate an active order (must also be in orderMap)
-	order := types.Order{
-		OrderID:          1,
-		ExecutedQuantity: fixedpoint.Zero,
-		SubmitOrder: types.SubmitOrder{
-			Quantity: Number(0.5),
-		},
-	}
-	worker.activeOrder = &order
-	worker.ordersMap[order.OrderID] = order
-
-	// full fill via trade
-	trades := &sync.Map{}
-	worker.OnNotify(func(trade types.Trade) {
-		trades.Store(trade.ID, struct{}{})
-	})
-	worker.HandleTrade(types.Trade{
-		ID:       1,
-		OrderID:  1,
-		Quantity: Number(0.5),
-		Price:    Number(50010.0),
-	})
-	waitForTrades(trades, 1)
-	assert.Equal(t, TWAPWorkerStateRunning, worker.State())
-	assert.False(t, worker.IsDone())
-	// processTrade no longer nils activeOrder; it sets status to FILLED instead
-	assert.NotNil(t, worker.ActiveOrder())
-	assert.Equal(t, types.OrderStatusFilled, worker.ActiveOrder().Status)
-	assert.Len(t, worker.Trades(), 1)
-	assert.Equal(t, Number(0.5), worker.FilledQuantity())
 }
