@@ -56,6 +56,17 @@ type Strategy struct {
 	checkRoundStartTime time.Time
 	currentTime         time.Time
 
+	// persist the positions
+	// the positions are shared across rounds and the executors of the same symbol.
+	spotPositions    map[string]*types.Position `persistence:"spot_positions"`
+	futuresPositions map[string]*types.Position `persistence:"futures_positions"`
+
+	// order executors for each symbol
+	// we need to cache the executors as map at startup since the executors are bound to the user data stream (via `.Bind()`).
+	// if we do no reuse them and create new executor at each round, the callbacks of the user data stream will be full of stale executors.
+	spotGeneralOrderExecutors    map[string]*bbgo.GeneralOrderExecutor
+	futuresGeneralOrderExecutors map[string]*bbgo.GeneralOrderExecutor
+
 	logger logrus.FieldLogger
 }
 
@@ -68,7 +79,6 @@ func (s *Strategy) InstanceID() string {
 	return fmt.Sprintf("%s-%s", ID, symbols)
 }
 
-// Defaults() -> Initialize() -> Validate() -> CrossSubscribe() -> CrossRun()
 func (s *Strategy) Defaults() error {
 	if len(s.CandidateSymbols) == 0 {
 		return errors.New("empty candidateSymbols")
@@ -99,6 +109,22 @@ func (s *Strategy) Initialize() error {
 	}
 	s.futuresOrderBooks = make(map[string]*types.StreamOrderBook)
 	s.spotOrderBooks = make(map[string]*types.StreamOrderBook)
+
+	// Initialize position maps (may be populated by LoadState if persisted state exists)
+	if s.spotPositions == nil {
+		s.spotPositions = make(map[string]*types.Position)
+	}
+	if s.futuresPositions == nil {
+		s.futuresPositions = make(map[string]*types.Position)
+	}
+
+	// Initialize executor maps
+	if s.spotGeneralOrderExecutors == nil {
+		s.spotGeneralOrderExecutors = make(map[string]*bbgo.GeneralOrderExecutor)
+	}
+	if s.futuresGeneralOrderExecutors == nil {
+		s.futuresGeneralOrderExecutors = make(map[string]*bbgo.GeneralOrderExecutor)
+	}
 
 	return nil
 }
@@ -141,12 +167,17 @@ func (s *Strategy) CrossRun(
 	if s.spotSession == nil {
 		return fmt.Errorf("spot session %s not found", s.SpotSession)
 	}
-	futuresEx, ok := s.futuresSession.Exchange.(types.FuturesExchange)
-	if !ok {
+	if futuresEx, ok := s.futuresSession.Exchange.(types.FuturesExchange); !ok {
 		return fmt.Errorf("sessioin %s does not support futures", s.futuresSession.Name)
-	}
-	if !futuresEx.GetFuturesSettings().IsFutures {
+	} else if !futuresEx.GetFuturesSettings().IsFutures {
 		return fmt.Errorf("session %s is not configured for futures trading", s.futuresSession.Name)
+	}
+
+	if _, ok := s.spotSession.Exchange.(types.ExchangeOrderQueryService); !ok {
+		return fmt.Errorf("spot session exchange does not support order query service: %s", s.spotSession.ExchangeName)
+	}
+	if _, ok := s.futuresSession.Exchange.(types.ExchangeOrderQueryService); !ok {
+		return fmt.Errorf("futures session exchange does not support order query service: %s", s.futuresSession.ExchangeName)
 	}
 
 	spotMarkets, err := s.spotSession.Exchange.QueryMarkets(ctx)
@@ -186,6 +217,49 @@ func (s *Strategy) CrossRun(
 	}
 
 	s.candidateSymbols = candidateSymbols
+	for _, symbol := range candidateSymbols {
+		spotMarket, found := s.spotSession.Market(symbol)
+		if !found {
+			return fmt.Errorf("market %s not found in spot session", symbol)
+		}
+		futuresMarket, found := s.futuresSession.Market(symbol)
+		if !found {
+			return fmt.Errorf("market %s not found in futures session", symbol)
+		}
+		var spotPosition, futuresPosition *types.Position
+		if p, found := s.spotPositions[symbol]; found {
+			spotPosition = p
+		} else {
+			spotPosition = types.NewPositionFromMarket(spotMarket)
+			s.spotPositions[symbol] = spotPosition
+		}
+		if p, found := s.futuresPositions[symbol]; found {
+			futuresPosition = p
+		} else {
+			futuresPosition = types.NewPositionFromMarket(futuresMarket)
+			s.futuresPositions[symbol] = futuresPosition
+		}
+		spotExecutor := bbgo.NewGeneralOrderExecutor(
+			s.spotSession,
+			symbol,
+			s.ID(),
+			s.InstanceID(),
+			spotPosition,
+		)
+		spotExecutor.DisableNotify()
+		spotExecutor.Bind()
+		s.spotGeneralOrderExecutors[symbol] = spotExecutor
+		futuresExecutor := bbgo.NewGeneralOrderExecutor(
+			s.futuresSession,
+			symbol,
+			s.ID(),
+			s.InstanceID(),
+			futuresPosition,
+		)
+		futuresExecutor.DisableNotify()
+		futuresExecutor.Bind()
+		s.futuresGeneralOrderExecutors[symbol] = futuresExecutor
+	}
 
 	// subscribe BNB pairs for trading fee calculation
 	quoteCurrencies := make(map[string]struct{})
@@ -222,7 +296,7 @@ func (s *Strategy) CrossRun(
 		return fmt.Errorf("failed to connect spot stream books: %w", err)
 	}
 
-	binanceEx, ok := s.futuresSession.Exchange.(*binance.Exchange)
+	binanceEx, _ := s.futuresSession.Exchange.(*binance.Exchange)
 	s.preliminaryMarketSelector = NewMarketSelector(*s.MarketSelectionConfig, binanceEx, s.logger)
 
 	for _, sess := range []*bbgo.ExchangeSession{s.spotSession, s.futuresSession} {
@@ -233,6 +307,14 @@ func (s *Strategy) CrossRun(
 			s.tick(ctx, kline.EndTime.Time())
 		}))
 	}
+
+	// Register shutdown handler to persist state
+	bbgo.OnShutdown(ctx, func(ctx context.Context, wg *sync.WaitGroup) {
+		defer wg.Done()
+		s.logger.Infof("shutting down %s", s.InstanceID())
+		bbgo.Sync(ctx, s)
+		s.logger.Infof("state persisted for %s", s.InstanceID())
+	})
 
 	return nil
 }
